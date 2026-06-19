@@ -43,6 +43,7 @@
 #include <xrpl/protocol/IOUAmount.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/Issue.h>
+#include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/MPTAmount.h>
 #include <xrpl/protocol/MPTIssue.h>
 #include <xrpl/protocol/Protocol.h>
@@ -342,6 +343,32 @@ class MPToken_test : public beast::unit_test::Suite
 
             mptAlice.set(
                 {.account = alice, .transferFee = 100, .err = tecNO_PERMISSION});
+        }
+
+        // XLS-0096: the confidential-balance storage fields are registered and
+        // attached to the MPToken / MPTokenIssuance ledger entries.
+        {
+            auto const onFormat = [&](LedgerEntryType type, SField const& sf) {
+                auto const* item = LedgerFormats::getInstance().findByType(type);
+                BEAST_EXPECT(item != nullptr);
+                if (!item)
+                    return;
+                bool found = false;
+                for (auto const& e : item->getSOTemplate())
+                    if (e.sField().getCode() == sf.getCode())
+                        found = true;
+                BEAST_EXPECT(found);
+            };
+
+            onFormat(ltMPTOKEN_ISSUANCE, sfIssuerEncryptionKey);
+            onFormat(ltMPTOKEN_ISSUANCE, sfAuditorEncryptionKey);
+            onFormat(ltMPTOKEN_ISSUANCE, sfConfidentialOutstandingAmount);
+            onFormat(ltMPTOKEN, sfHolderEncryptionKey);
+            onFormat(ltMPTOKEN, sfConfidentialBalanceSpending);
+            onFormat(ltMPTOKEN, sfConfidentialBalanceInbox);
+            onFormat(ltMPTOKEN, sfIssuerEncryptedBalance);
+            onFormat(ltMPTOKEN, sfAuditorEncryptedBalance);
+            onFormat(ltMPTOKEN, sfConfidentialBalanceVersion);
         }
     }
 

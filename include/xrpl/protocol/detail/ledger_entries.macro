@@ -401,6 +401,9 @@ LEDGER_ENTRY(ltMPTOKEN_ISSUANCE, 0x007e, MPTokenIssuance, mpt_issuance, ({
     {sfDomainID,                 SoeOptional},
     {sfMutableFlags,             SoeDefault},
     {sfReferenceHolding,         SoeOptional},
+    {sfIssuerEncryptionKey,      SoeOptional}, // XLS-0096 Confidential MPT
+    {sfAuditorEncryptionKey,     SoeOptional}, // XLS-0096 Confidential MPT
+    {sfConfidentialOutstandingAmount, SoeOptional}, // XLS-0096 Confidential MPT
 }))
 
 /** A ledger object which tracks MPToken
@@ -414,6 +417,12 @@ LEDGER_ENTRY(ltMPTOKEN, 0x007f, MPToken, mptoken, ({
     {sfOwnerNode,                SoeRequired},
     {sfPreviousTxnID,            SoeRequired},
     {sfPreviousTxnLgrSeq,        SoeRequired},
+    {sfHolderEncryptionKey,        SoeOptional}, // XLS-0096 Confidential MPT
+    {sfConfidentialBalanceSpending, SoeOptional}, // XLS-0096 Confidential MPT
+    {sfConfidentialBalanceInbox,   SoeOptional}, // XLS-0096 Confidential MPT
+    {sfIssuerEncryptedBalance,     SoeOptional}, // XLS-0096 Confidential MPT
+    {sfAuditorEncryptedBalance,    SoeOptional}, // XLS-0096 Confidential MPT
+    {sfConfidentialBalanceVersion, SoeOptional}, // XLS-0096 Confidential MPT
 }))
 
 /** A ledger object which tracks Oracle

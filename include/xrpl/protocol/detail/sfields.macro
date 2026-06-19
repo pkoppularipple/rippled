@@ -147,6 +147,7 @@ TYPED_SFIELD(sfSubjectNode,              UINT64,    28)
 TYPED_SFIELD(sfLockedAmount,             UINT64,    29, SField::kSmdBaseTen|SField::kSmdDefault)
 TYPED_SFIELD(sfVaultNode,                UINT64,    30)
 TYPED_SFIELD(sfLoanBrokerNode,           UINT64,    31)
+TYPED_SFIELD(sfConfidentialOutstandingAmount, UINT64, 32, SField::kSmdBaseTen|SField::kSmdDefault) // XLS-0096 Confidential MPT
 
 // 128-bit
 TYPED_SFIELD(sfEmailHash,                UINT128,    1)
@@ -300,6 +301,14 @@ TYPED_SFIELD(sfAssetClass,               VL,        28)
 TYPED_SFIELD(sfProvider,                 VL,        29)
 TYPED_SFIELD(sfMPTokenMetadata,          VL,        30)
 TYPED_SFIELD(sfCredentialType,           VL,        31)
+// XLS-0096 Confidential MPT (EC-ElGamal public keys and encrypted balances)
+TYPED_SFIELD(sfIssuerEncryptionKey,         VL,     32)
+TYPED_SFIELD(sfAuditorEncryptionKey,        VL,     33)
+TYPED_SFIELD(sfHolderEncryptionKey,         VL,     34)
+TYPED_SFIELD(sfConfidentialBalanceSpending, VL,     35)
+TYPED_SFIELD(sfConfidentialBalanceInbox,    VL,     36)
+TYPED_SFIELD(sfIssuerEncryptedBalance,      VL,     37)
+TYPED_SFIELD(sfAuditorEncryptedBalance,     VL,     38)
 
 // account (common)
 TYPED_SFIELD(sfAccount,                  ACCOUNT,    1)

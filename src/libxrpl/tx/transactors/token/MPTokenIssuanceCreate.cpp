@@ -37,6 +37,9 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFieldPresent(sfMutableFlags) && !ctx.rules.enabled(featureDynamicMPT))
         return false;
 
+    if (ctx.tx.isFlag(tfMPTCanConfidentialAmount) && !ctx.rules.enabled(featureConfidentialMPT))
+        return false;
+
     return true;
 }
 
@@ -70,6 +73,11 @@ MPTokenIssuanceCreate::preflight(PreflightContext const& ctx)
         // must also be set.
         if (fee > 0u && !ctx.tx.isFlag(tfMPTCanTransfer))
             return temMALFORMED;
+
+        // XLS-0096: confidential amounts are incompatible with a transfer
+        // fee, since the fee cannot be computed over a hidden balance.
+        if (fee > 0u && ctx.tx.isFlag(tfMPTCanConfidentialAmount))
+            return temBAD_TRANSFER_FEE;
     }
 
     if (auto const domain = ctx.tx[~sfDomainID])

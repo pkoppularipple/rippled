@@ -220,6 +220,12 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
         if (fee > 0u && !sleMptIssuance->isFlag(lsfMPTCanTransfer))
             return tecNO_PERMISSION;
 
+        // XLS-0096: a transfer fee cannot be applied to an issuance that has
+        // confidential amounts enabled, since the fee cannot be computed over
+        // a hidden balance.
+        if (fee > 0u && sleMptIssuance->isFlag(lsfMPTCanConfidentialAmount))
+            return tecNO_PERMISSION;
+
         if (!isMutableFlag(lsmfMPTCanMutateTransferFee))
             return tecNO_PERMISSION;
     }

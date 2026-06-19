@@ -289,6 +289,63 @@ class MPToken_test : public beast::unit_test::Suite
     }
 
     void
+    testConfidentialMPT(FeatureBitset features)
+    {
+        testcase("Confidential MPT (XLS-0096)");
+
+        using namespace test::jtx;
+        Account const alice("alice");
+
+        // The confidential-amount flag is rejected unless the ConfidentialMPT
+        // amendment is enabled.
+        {
+            Env env{*this, features - featureConfidentialMPT};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount,
+                 .err = temDISABLED});
+        }
+
+        // With the amendment enabled, an issuance may enable confidential
+        // amounts when no transfer fee is present.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+            BEAST_EXPECT(
+                mptAlice.checkFlags(lsfMPTCanTransfer | lsfMPTCanConfidentialAmount));
+        }
+
+        // Confidential amounts are incompatible with a transfer fee at
+        // issuance.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.transferFee = 10,
+                 .flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount,
+                 .err = temBAD_TRANSFER_FEE});
+        }
+
+        // A transfer fee cannot later be applied via MPTokenIssuanceSet to an
+        // issuance that has confidential amounts enabled, even when the fee is
+        // otherwise mutable.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount,
+                 .mutableFlags = tmfMPTCanMutateTransferFee});
+
+            mptAlice.set(
+                {.account = alice, .transferFee = 100, .err = tecNO_PERMISSION});
+        }
+    }
+
+    void
     testDestroyValidation(FeatureBitset features)
     {
         testcase("Destroy Validate");
@@ -7758,6 +7815,7 @@ public:
         testCreateValidation(all);
         testCreateEnabled(all - featureSingleAssetVault);
         testCreateEnabled(all);
+        testConfidentialMPT(all);
 
         // MPTokenIssuanceDestroy
         testDestroyValidation(all - featureSingleAssetVault);

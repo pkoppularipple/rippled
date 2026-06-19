@@ -140,7 +140,8 @@ inline constexpr FlagValue tfUniversalMask = ~tfUniversal;
         TF_FLAG(tfMPTCanEscrow, lsfMPTCanEscrow)                                                                                                               \
         TF_FLAG(tfMPTCanTrade, lsfMPTCanTrade)                                                                                                                 \
         TF_FLAG(tfMPTCanTransfer, lsfMPTCanTransfer)                                                                                                           \
-        TF_FLAG(tfMPTCanClawback, lsfMPTCanClawback),                                                                                                          \
+        TF_FLAG(tfMPTCanClawback, lsfMPTCanClawback)                                                                                                           \
+        TF_FLAG(tfMPTCanConfidentialAmount, lsfMPTCanConfidentialAmount),    /* XLS-0096 Confidential MPT */                                                   \
         MASK_ADJ(0))                                                                                                                                           \
                                                                                                                                                                \
     TRANSACTION(MPTokenAuthorize,                                                                                                                              \

@@ -437,6 +437,36 @@ class MPToken_test : public beast::unit_test::Suite
                     strHex(sle->getFieldVL(sfAuditorEncryptionKey)) == strHex(auditorKey));
             }
         }
+
+        // Regression: key registration on a confidential issuance that lacks the
+        // lock capability must succeed even when neither SingleAssetVault nor
+        // DynamicMPT is enabled. Key registration is an XLS-0096 operation and
+        // must not be tied to the unrelated lock capability.
+        {
+            Env env{
+                *this,
+                features - featureSingleAssetVault - featureDynamicMPT};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+            mptAlice.set(
+                {.account = alice,
+                 .issuerEncryptionKey = issuerKey,
+                 .auditorEncryptionKey = auditorKey});
+
+            auto const sle = env.le(keylet::mptIssuance(mptAlice.issuanceID()));
+            BEAST_EXPECT(sle != nullptr);
+            if (sle)
+            {
+                BEAST_EXPECT(
+                    sle->isFieldPresent(sfIssuerEncryptionKey) &&
+                    strHex(sle->getFieldVL(sfIssuerEncryptionKey)) == strHex(issuerKey));
+                BEAST_EXPECT(
+                    sle->isFieldPresent(sfAuditorEncryptionKey) &&
+                    strHex(sle->getFieldVL(sfAuditorEncryptionKey)) == strHex(auditorKey));
+            }
+        }
     }
 
     void

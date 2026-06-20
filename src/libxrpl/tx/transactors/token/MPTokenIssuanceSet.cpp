@@ -172,11 +172,16 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
     if (!sleMptIssuance)
         return tecOBJECT_NOT_FOUND;
 
+    // XLS-0096: registering EC-ElGamal encryption keys is a confidential-MPT
+    // operation that is independent of the lock capability.
+    bool const isKeyRegistration = ctx.tx.isFieldPresent(sfIssuerEncryptionKey) ||
+        ctx.tx.isFieldPresent(sfAuditorEncryptionKey);
+
     if (!sleMptIssuance->isFlag(lsfMPTCanLock))
     {
         // For readability two separate `if` rather than `||` of two conditions
         if (!ctx.view.rules().enabled(featureSingleAssetVault) &&
-            !ctx.view.rules().enabled(featureDynamicMPT))
+            !ctx.view.rules().enabled(featureDynamicMPT) && !isKeyRegistration)
         {
             return tecNO_PERMISSION;
         }
@@ -192,12 +197,8 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
 
     // XLS-0096: encryption keys may only be registered on an issuance that has
     // the confidential-amount capability enabled.
-    if (ctx.tx.isFieldPresent(sfIssuerEncryptionKey) ||
-        ctx.tx.isFieldPresent(sfAuditorEncryptionKey))
-    {
-        if (!sleMptIssuance->isFlag(lsfMPTCanConfidentialAmount))
-            return tecNO_PERMISSION;
-    }
+    if (isKeyRegistration && !sleMptIssuance->isFlag(lsfMPTCanConfidentialAmount))
+        return tecNO_PERMISSION;
 
     if (auto const holderID = ctx.tx[~sfHolder])
     {

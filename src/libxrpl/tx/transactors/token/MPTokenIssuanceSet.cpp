@@ -68,6 +68,10 @@ static constexpr std::array<MPTMutabilityFlags, 6> kMptMutabilityFlags = {
       .clearFlag = tmfMPTClearCanClawback,
       .canMutateFlag = lsmfMPTCanMutateCanClawback}}};
 
+// XLS-0096: EC-ElGamal public keys are single compressed curve points; bound
+// the registered key length to the size of an XRPL public key.
+static constexpr std::size_t kMaxConfidentialKeyLength = 33;
+
 NotTEC
 MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
 {
@@ -91,10 +95,35 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     if (holderID && accountID == holderID)
         return temMALFORMED;
 
+    // XLS-0096: an issuer may register EC-ElGamal encryption keys on the
+    // issuance. Key registration is gated on the ConfidentialMPT amendment and
+    // is an issuance-level operation, so a holder must not be present.
+    auto const issuerKey = ctx.tx[~sfIssuerEncryptionKey];
+    auto const auditorKey = ctx.tx[~sfAuditorEncryptionKey];
+    bool const hasKeys = issuerKey || auditorKey;
+
+    if (hasKeys)
+    {
+        if (!ctx.rules.enabled(featureConfidentialMPT))
+            return temDISABLED;
+
+        if (holderID)
+            return temMALFORMED;
+
+        if (issuerKey &&
+            (issuerKey->length() == 0 || issuerKey->length() > kMaxConfidentialKeyLength))
+            return temMALFORMED;
+
+        if (auditorKey &&
+            (auditorKey->length() == 0 || auditorKey->length() > kMaxConfidentialKeyLength))
+            return temMALFORMED;
+    }
+
     if (ctx.rules.enabled(featureSingleAssetVault) || ctx.rules.enabled(featureDynamicMPT))
     {
         // Is this transaction actually changing anything ?
-        if (ctx.tx.getFlags() == 0 && !ctx.tx.isFieldPresent(sfDomainID) && !isMutate)
+        if (ctx.tx.getFlags() == 0 && !ctx.tx.isFieldPresent(sfDomainID) && !isMutate &&
+            !hasKeys)
             return temMALFORMED;
     }
 
@@ -143,11 +172,16 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
     if (!sleMptIssuance)
         return tecOBJECT_NOT_FOUND;
 
+    // XLS-0096: registering EC-ElGamal encryption keys is a confidential-MPT
+    // operation that is independent of the lock capability.
+    bool const isKeyRegistration = ctx.tx.isFieldPresent(sfIssuerEncryptionKey) ||
+        ctx.tx.isFieldPresent(sfAuditorEncryptionKey);
+
     if (!sleMptIssuance->isFlag(lsfMPTCanLock))
     {
         // For readability two separate `if` rather than `||` of two conditions
         if (!ctx.view.rules().enabled(featureSingleAssetVault) &&
-            !ctx.view.rules().enabled(featureDynamicMPT))
+            !ctx.view.rules().enabled(featureDynamicMPT) && !isKeyRegistration)
         {
             return tecNO_PERMISSION;
         }
@@ -159,6 +193,11 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
 
     // ensure it is issued by the tx submitter
     if ((*sleMptIssuance)[sfIssuer] != ctx.tx[sfAccount])
+        return tecNO_PERMISSION;
+
+    // XLS-0096: encryption keys may only be registered on an issuance that has
+    // the confidential-amount capability enabled.
+    if (isKeyRegistration && !sleMptIssuance->isFlag(lsfMPTCanConfidentialAmount))
         return tecNO_PERMISSION;
 
     if (auto const holderID = ctx.tx[~sfHolder])
@@ -335,6 +374,13 @@ MPTokenIssuanceSet::doApply()
                 sle->makeFieldAbsent(sfDomainID);
         }
     }
+
+    // XLS-0096: register the issuer / auditor encryption keys on the issuance.
+    if (auto const issuerKey = ctx_.tx[~sfIssuerEncryptionKey])
+        sle->setFieldVL(sfIssuerEncryptionKey, *issuerKey);
+
+    if (auto const auditorKey = ctx_.tx[~sfAuditorEncryptionKey])
+        sle->setFieldVL(sfAuditorEncryptionKey, *auditorKey);
 
     view().update(sle);
 

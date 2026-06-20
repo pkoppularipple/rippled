@@ -83,6 +83,14 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
     if (isMutate && !ctx.rules.enabled(featureDynamicMPT))
         return temDISABLED;
 
+    // XLS-0096: toggling the confidential-amount flag via MutableFlags is gated
+    // on the ConfidentialMPT amendment.
+    if (mutableFlags &&
+        ((*mutableFlags & (tmfMPTSetCanConfidentialAmount | tmfMPTClearCanConfidentialAmount)) !=
+         0u) &&
+        !ctx.rules.enabled(featureConfidentialMPT))
+        return temDISABLED;
+
     if (ctx.tx.isFieldPresent(sfDomainID) && ctx.tx.isFieldPresent(sfHolder))
         return temMALFORMED;
 
@@ -158,6 +166,23 @@ MPTokenIssuanceSet::preflight(PreflightContext const& ctx)
             // in the same transaction is not allowed.
             if ((transferFee.value_or(0) != 0u) && ((*mutableFlags & tmfMPTClearCanTransfer) != 0u))
                 return temMALFORMED;
+
+            // XLS-0096: the confidential-amount set/clear flags are mutually
+            // exclusive within a single transaction.
+            if (((*mutableFlags & tmfMPTSetCanConfidentialAmount) != 0u) &&
+                ((*mutableFlags & tmfMPTClearCanConfidentialAmount) != 0u))
+                return temINVALID_FLAG;
+
+            // XLS-0096: encryption keys must not be registered while clearing
+            // the confidential-amount flag.
+            if (hasKeys && ((*mutableFlags & tmfMPTClearCanConfidentialAmount) != 0u))
+                return temINVALID_FLAG;
+
+            // XLS-0096: enabling confidential amounts is incompatible with
+            // setting a non-zero transfer fee in the same transaction.
+            if ((transferFee.value_or(0) != 0u) &&
+                ((*mutableFlags & tmfMPTSetCanConfidentialAmount) != 0u))
+                return temBAD_TRANSFER_FEE;
         }
     }
 
@@ -196,8 +221,12 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
         return tecNO_PERMISSION;
 
     // XLS-0096: encryption keys may only be registered on an issuance that has
-    // the confidential-amount capability enabled.
-    if (isKeyRegistration && !sleMptIssuance->isFlag(lsfMPTCanConfidentialAmount))
+    // the confidential-amount capability enabled, or one that enables it in the
+    // same transaction via tmfMPTSetCanConfidentialAmount.
+    bool const enablingConfidentialAmount =
+        (ctx.tx[~sfMutableFlags].value_or(0) & tmfMPTSetCanConfidentialAmount) != 0u;
+    if (isKeyRegistration && !sleMptIssuance->isFlag(lsfMPTCanConfidentialAmount) &&
+        !enablingConfidentialAmount)
         return tecNO_PERMISSION;
 
     if (auto const holderID = ctx.tx[~sfHolder])
@@ -244,6 +273,29 @@ MPTokenIssuanceSet::preclaim(PreclaimContext const& ctx)
         // a DomainID set, because a DomainID requires RequireAuth to be active.
         if ((*mutableFlags & tmfMPTClearRequireAuth) != 0u &&
             sleMptIssuance->isFieldPresent(sfDomainID))
+            return tecNO_PERMISSION;
+
+        // XLS-0096: validate confidential-amount flag toggles.
+        bool const setConfidentialAmount = (*mutableFlags & tmfMPTSetCanConfidentialAmount) != 0u;
+        bool const clearConfidentialAmount =
+            (*mutableFlags & tmfMPTClearCanConfidentialAmount) != 0u;
+
+        // The confidential-amount flag is immutable when the issuance was
+        // created with lsmfMPTCannotMutateCanConfidentialAmount set.
+        if ((setConfidentialAmount || clearConfidentialAmount) &&
+            isMutableFlag(lsmfMPTCannotMutateCanConfidentialAmount))
+            return tecNO_PERMISSION;
+
+        // Disabling confidential amounts is only permitted while no confidential
+        // supply is outstanding.
+        if (clearConfidentialAmount &&
+            sleMptIssuance->isFieldPresent(sfConfidentialOutstandingAmount) &&
+            sleMptIssuance->getFieldU64(sfConfidentialOutstandingAmount) > 0u)
+            return tecNO_PERMISSION;
+
+        // Enabling confidential amounts is incompatible with an existing
+        // non-zero transfer fee on the issuance.
+        if (setConfidentialAmount && (*sleMptIssuance)[~sfTransferFee].value_or(0) != 0u)
             return tecNO_PERMISSION;
     }
 
@@ -316,6 +368,16 @@ MPTokenIssuanceSet::doApply()
             {
                 flagsOut &= ~f.canMutateFlag;
             }
+        }
+
+        // XLS-0096: toggle the confidential-amount capability flag.
+        if ((mutableFlags & tmfMPTSetCanConfidentialAmount) != 0u)
+        {
+            flagsOut |= lsfMPTCanConfidentialAmount;
+        }
+        else if ((mutableFlags & tmfMPTClearCanConfidentialAmount) != 0u)
+        {
+            flagsOut &= ~lsfMPTCanConfidentialAmount;
         }
 
         if ((mutableFlags & tmfMPTClearCanTransfer) != 0u)

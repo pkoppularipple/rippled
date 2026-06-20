@@ -40,6 +40,13 @@ MPTokenIssuanceCreate::checkExtraFeatures(PreflightContext const& ctx)
     if (ctx.tx.isFlag(tfMPTCanConfidentialAmount) && !ctx.rules.enabled(featureConfidentialMPT))
         return false;
 
+    // XLS-0096: marking the confidential-amount flag immutable at creation is
+    // gated on the ConfidentialMPT amendment.
+    if (auto const mutableFlags = ctx.tx[~sfMutableFlags];
+        mutableFlags && ((*mutableFlags & tmfMPTCannotMutateCanConfidentialAmount) != 0u) &&
+        !ctx.rules.enabled(featureConfidentialMPT))
+        return false;
+
     return true;
 }
 

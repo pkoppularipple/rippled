@@ -467,6 +467,174 @@ class MPToken_test : public beast::unit_test::Suite
                     strHex(sle->getFieldVL(sfAuditorEncryptionKey)) == strHex(auditorKey));
             }
         }
+
+        // XLS-0096 §12: toggling the confidential-amount flag via
+        // MPTokenIssuanceSet MutableFlags.
+
+        // Toggling the flag is rejected unless the ConfidentialMPT amendment is
+        // enabled.
+        {
+            Env env{*this, features - featureConfidentialMPT};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            mptAlice.set(
+                {.account = alice,
+                 .mutableFlags = tmfMPTSetCanConfidentialAmount,
+                 .err = temDISABLED});
+        }
+
+        // The issuer enables confidential amounts post-issuance (mutable by
+        // default).
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            mptAlice.set(
+                {.account = alice, .mutableFlags = tmfMPTSetCanConfidentialAmount});
+            BEAST_EXPECT(
+                mptAlice.checkFlags(lsfMPTCanTransfer | lsfMPTCanConfidentialAmount));
+        }
+
+        // The issuer disables confidential amounts post-issuance when no
+        // confidential supply is outstanding.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+            mptAlice.set(
+                {.account = alice, .mutableFlags = tmfMPTClearCanConfidentialAmount});
+            BEAST_EXPECT(mptAlice.checkFlags(lsfMPTCanTransfer));
+        }
+
+        // Setting and clearing the confidential-amount flag in the same
+        // transaction is rejected.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            mptAlice.set(
+                {.account = alice,
+                 .mutableFlags =
+                     tmfMPTSetCanConfidentialAmount | tmfMPTClearCanConfidentialAmount,
+                 .err = temINVALID_FLAG});
+        }
+
+        // Registering encryption keys while clearing the confidential-amount
+        // flag is rejected.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+            mptAlice.set(
+                {.account = alice,
+                 .mutableFlags = tmfMPTClearCanConfidentialAmount,
+                 .issuerEncryptionKey = issuerKey,
+                 .err = temINVALID_FLAG});
+        }
+
+        // Enabling confidential amounts while setting a non-zero transfer fee in
+        // the same transaction is rejected.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanTransfer,
+                 .mutableFlags = tmfMPTCanMutateTransferFee});
+            mptAlice.set(
+                {.account = alice,
+                 .mutableFlags = tmfMPTSetCanConfidentialAmount,
+                 .transferFee = 100,
+                 .err = temBAD_TRANSFER_FEE});
+        }
+
+        // Enabling confidential amounts on an issuance that already carries a
+        // non-zero transfer fee is rejected.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.transferFee = 100, .ownerCount = 1, .flags = tfMPTCanTransfer});
+            mptAlice.set(
+                {.account = alice,
+                 .mutableFlags = tmfMPTSetCanConfidentialAmount,
+                 .err = tecNO_PERMISSION});
+        }
+
+        // A non-issuer cannot toggle the confidential-amount flag.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice, {.holders = {bob}});
+            mptAlice.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            mptAlice.set(
+                {.account = bob,
+                 .mutableFlags = tmfMPTSetCanConfidentialAmount,
+                 .err = tecNO_PERMISSION});
+        }
+
+        // When the issuance was created with the confidential-amount flag marked
+        // immutable, it can neither be set nor cleared afterwards.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanTransfer,
+                 .mutableFlags = tmfMPTCannotMutateCanConfidentialAmount});
+            mptAlice.set(
+                {.account = alice,
+                 .mutableFlags = tmfMPTSetCanConfidentialAmount,
+                 .err = tecNO_PERMISSION});
+        }
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.ownerCount = 1,
+                 .flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount,
+                 .mutableFlags = tmfMPTCannotMutateCanConfidentialAmount});
+            mptAlice.set(
+                {.account = alice,
+                 .mutableFlags = tmfMPTClearCanConfidentialAmount,
+                 .err = tecNO_PERMISSION});
+        }
+
+        // Marking the confidential-amount flag immutable at creation is gated on
+        // the ConfidentialMPT amendment.
+        {
+            Env env{*this, features - featureConfidentialMPT};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create(
+                {.flags = tfMPTCanTransfer,
+                 .mutableFlags = tmfMPTCannotMutateCanConfidentialAmount,
+                 .err = temDISABLED});
+        }
+
+        // The issuer enables confidential amounts and registers an encryption
+        // key in a single atomic transaction.
+        {
+            Env env{*this, features};
+            MPTTester mptAlice(env, alice);
+            mptAlice.create({.ownerCount = 1, .flags = tfMPTCanTransfer});
+            mptAlice.set(
+                {.account = alice,
+                 .mutableFlags = tmfMPTSetCanConfidentialAmount,
+                 .issuerEncryptionKey = issuerKey});
+
+            auto const sle = env.le(keylet::mptIssuance(mptAlice.issuanceID()));
+            BEAST_EXPECT(sle != nullptr);
+            if (sle)
+            {
+                BEAST_EXPECT(sle->isFlag(lsfMPTCanConfidentialAmount));
+                BEAST_EXPECT(
+                    sle->isFieldPresent(sfIssuerEncryptionKey) &&
+                    strHex(sle->getFieldVL(sfIssuerEncryptionKey)) == strHex(issuerKey));
+            }
+        }
     }
 
     void

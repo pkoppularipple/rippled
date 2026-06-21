@@ -358,6 +358,7 @@ enum TECcodes : TERUnderlyingType {
     tecLIMIT_EXCEEDED = 195,
     tecPSEUDO_ACCOUNT = 196,
     tecPRECISION_LOSS = 197,
+    tecBAD_PROOF = 198,  // XLS-0096 Confidential MPT: a zero-knowledge proof failed to verify
 };
 
 //------------------------------------------------------------------------------

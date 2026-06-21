@@ -387,6 +387,10 @@ ValidMPTPayment::visitEntry(bool, SLE::const_ref before, SLE::const_ref after)
                 return false;
             }
             data_[makeKey(sle)].outstanding[static_cast<std::size_t>(order)] = outstanding;
+            // XLS-0096: track the confidential outstanding amount so the
+            // balance check can offset confidential conversions.
+            data_[makeKey(sle)].coa[static_cast<std::size_t>(order)] =
+                static_cast<std::int64_t>(sle[~sfConfidentialOutstandingAmount].value_or(0));
         }
         else if (type == ltMPTOKEN)
         {
@@ -449,11 +453,16 @@ ValidMPTPayment::finalize(
             (void)id;
             static constexpr auto kIBefore = static_cast<std::size_t>(Order::Before);
             static constexpr auto kIAfter = static_cast<std::size_t>(Order::After);
+            // XLS-0096: a confidential conversion moves value between the
+            // public balance and the confidential balance, so the expected
+            // OutstandingAmount delta is ΣΔMPT + ΔCOA.
+            std::int64_t const delta =
+                data.mptAmount + (data.coa[kIAfter] - data.coa[kIBefore]);
             bool const addOverflows =
-                (data.mptAmount > 0 && data.outstanding[kIBefore] > (signedMax - data.mptAmount)) ||
-                (data.mptAmount < 0 && data.outstanding[kIBefore] < (-signedMax - data.mptAmount));
+                (delta > 0 && data.outstanding[kIBefore] > (signedMax - delta)) ||
+                (delta < 0 && data.outstanding[kIBefore] < (-signedMax - delta));
             if (addOverflows ||
-                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + data.mptAmount))
+                data.outstanding[kIAfter] != (data.outstanding[kIBefore] + delta))
             {
                 JLOG(j.fatal()) << "Invariant failed: invalid OutstandingAmount balance "
                                 << data.outstanding[kIBefore] << " " << data.outstanding[kIAfter]

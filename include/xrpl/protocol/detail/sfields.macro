@@ -309,6 +309,15 @@ TYPED_SFIELD(sfConfidentialBalanceSpending, VL,     35)
 TYPED_SFIELD(sfConfidentialBalanceInbox,    VL,     36)
 TYPED_SFIELD(sfIssuerEncryptedBalance,      VL,     37)
 TYPED_SFIELD(sfAuditorEncryptedBalance,     VL,     38)
+TYPED_SFIELD(sfHolderEncryptedAmount,       VL,     39) // XLS-0096 Confidential MPT
+TYPED_SFIELD(sfIssuerEncryptedAmount,       VL,     40) // XLS-0096 Confidential MPT
+TYPED_SFIELD(sfAuditorEncryptedAmount,      VL,     41) // XLS-0096 Confidential MPT
+TYPED_SFIELD(sfSenderEncryptedAmount,       VL,     42) // XLS-0096 Confidential MPT
+TYPED_SFIELD(sfDestinationEncryptedAmount,  VL,     43) // XLS-0096 Confidential MPT
+TYPED_SFIELD(sfAmountCommitment,            VL,     44) // XLS-0096 Confidential MPT
+TYPED_SFIELD(sfBalanceCommitment,           VL,     45) // XLS-0096 Confidential MPT
+TYPED_SFIELD(sfZKProof,                     VL,     46) // XLS-0096 Confidential MPT
+TYPED_SFIELD(sfBlindingFactor,              VL,     47) // XLS-0096 Confidential MPT
 
 // account (common)
 TYPED_SFIELD(sfAccount,                  ACCOUNT,    1)

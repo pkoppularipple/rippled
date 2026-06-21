@@ -119,6 +119,11 @@ public:
     [[nodiscard]] ElGamalCiphertext
     operator+(ElGamalCiphertext const& o) const;
 
+    /// Homomorphic subtraction: yields an encryption of the difference of the
+    /// plaintexts (component-wise point subtraction).
+    [[nodiscard]] ElGamalCiphertext
+    operator-(ElGamalCiphertext const& o) const;
+
     /// Recover m*G = c2 - x*c1.
     [[nodiscard]] ECPoint
     decryptToPoint(Scalar const& secret) const;
@@ -243,6 +248,134 @@ private:
 
     std::uint8_t bits_{0};
     std::vector<BitProof> bitProofs_;
+};
+
+//------------------------------------------------------------------------------
+
+/** Zero-knowledge proof that an EC-ElGamal ciphertext and a Pedersen
+    commitment encode the same value, proven through knowledge of the
+    ciphertext's secret key.
+
+    Given a ciphertext ct = (c1, c2) under public key Y = x*G and a commitment
+    P = m*G + r*H, the prover demonstrates knowledge of (x, m, r) such that:
+      - Y  = x*G                  (ownership of the encryption key)
+      - c2 = m*G + x*c1           (ct decrypts under x to m*G)
+      - P  = m*G + r*H            (P commits to the same m)
+
+    This is the "balance/amount linkage" building block of the send path: the
+    relevant ciphertexts (the transfer amount and the post-debit spending
+    balance) are encrypted under the holder's own key, so the holder can prove
+    the link via knowledge of their secret key. Non-interactive via Fiat-Shamir.
+*/
+class LinkageProof
+{
+public:
+    /// Serialized size: challenge + three response scalars.
+    static constexpr std::size_t kSize = 4 * kScalarSize;
+
+    LinkageProof() = default;
+    LinkageProof(Scalar e, Scalar zx, Scalar zm, Scalar zr)
+        : e_(e), zx_(zx), zm_(zm), zr_(zr)
+    {
+    }
+
+    /** Prove ct (under public key pub = secret*G) and commitment encode value.
+
+        @param secret      the ElGamal secret key x (pub == x*G).
+        @param value       the common plaintext m.
+        @param blind       the Pedersen blinding factor r.
+        @param ct          the ElGamal ciphertext encrypting m under pub.
+        @param commitment  the Pedersen commitment m*G + r*H.
+    */
+    static LinkageProof
+    prove(
+        Scalar const& secret,
+        std::uint64_t value,
+        Scalar const& blind,
+        ElGamalCiphertext const& ct,
+        PedersenCommitment const& commitment);
+
+    [[nodiscard]] bool
+    verify(
+        ElGamalPublicKey const& pub,
+        ElGamalCiphertext const& ct,
+        PedersenCommitment const& commitment) const;
+
+    [[nodiscard]] std::array<std::uint8_t, kSize>
+    serialize() const;
+
+    static std::optional<LinkageProof>
+    deserialize(Slice const& in);
+
+private:
+    Scalar e_;
+    Scalar zx_;
+    Scalar zm_;
+    Scalar zr_;
+};
+
+//------------------------------------------------------------------------------
+
+/** Zero-knowledge proof that two EC-ElGamal ciphertexts, possibly under
+    different public keys, encrypt the same plaintext.
+
+    Given ct1 = (a1, a2) under Y1 and ct2 = (b1, b2) under Y2, the prover
+    demonstrates knowledge of (m, k1, k2) such that:
+      - a1 = k1*G,  a2 = m*G + k1*Y1
+      - b1 = k2*G,  b2 = m*G + k2*Y2
+
+    This is the "ciphertext consistency" building block of the send path: it
+    proves the amount credited to the receiver / issuer / auditor mirrors equals
+    the amount debited from the sender. Non-interactive via Fiat-Shamir.
+*/
+class PlaintextEqualityProof
+{
+public:
+    /// Serialized size: challenge + three response scalars.
+    static constexpr std::size_t kSize = 4 * kScalarSize;
+
+    PlaintextEqualityProof() = default;
+    PlaintextEqualityProof(Scalar e, Scalar zm, Scalar z1, Scalar z2)
+        : e_(e), zm_(zm), z1_(z1), z2_(z2)
+    {
+    }
+
+    /** Prove ct1 (under pub1) and ct2 (under pub2) encrypt the same value.
+
+        @param pub1   public key of the first ciphertext.
+        @param pub2   public key of the second ciphertext.
+        @param value  the common plaintext m.
+        @param k1     randomness used to form ct1.
+        @param k2     randomness used to form ct2.
+    */
+    static PlaintextEqualityProof
+    prove(
+        ElGamalPublicKey const& pub1,
+        ElGamalPublicKey const& pub2,
+        std::uint64_t value,
+        Scalar const& k1,
+        Scalar const& k2,
+        ElGamalCiphertext const& ct1,
+        ElGamalCiphertext const& ct2);
+
+    [[nodiscard]] bool
+    verify(
+        ElGamalPublicKey const& pub1,
+        ElGamalPublicKey const& pub2,
+        ElGamalCiphertext const& ct1,
+        ElGamalCiphertext const& ct2) const;
+
+    [[nodiscard]] std::array<std::uint8_t, kSize>
+    serialize() const;
+
+    static std::optional<PlaintextEqualityProof>
+    deserialize(Slice const& in);
+
+private:
+    Scalar e_;
+    Scalar zm_;
+    Scalar z1_;
+    Scalar z2_;
 };
 
 }  // namespace cmpt

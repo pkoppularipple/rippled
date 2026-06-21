@@ -108,6 +108,12 @@ ElGamalCiphertext::encrypt(
     std::uint64_t m,
     Scalar const& k)
 {
+    // Reject the identity/all-zero public key: it would zero the k*Y mask,
+    // leaving c2 = m*G and making the plaintext recoverable without the key.
+    if (pub.isInfinity())
+        Throw<std::runtime_error>(
+            "ElGamalCiphertext::encrypt: identity public key");
+
     ECPoint const c1 = ECPoint::mulBase(k);
     ECPoint const c2 = ECPoint::mulBase(Scalar(m)) + ECPoint::mul(k, pub);
     return ElGamalCiphertext{c1, c2};
@@ -207,6 +213,12 @@ ElGamalCiphertext::deserialize(Slice const& in)
 SchnorrProof
 SchnorrProof::prove(Scalar const& secret, ElGamalPublicKey const& pub)
 {
+    // Never produce a proof for the identity key (secret == 0). Such a key
+    // removes the EC-ElGamal mask, so accepting it enables a rogue-key attack.
+    if (secret.isZero() || pub.isInfinity())
+        Throw<std::runtime_error>(
+            "SchnorrProof::prove: identity/zero public key");
+
     Scalar const w = Scalar::random();
     ECPoint const t = ECPoint::mulBase(w);  // commitment A = w*G
     auto const pb = pub.serialize();
@@ -221,6 +233,12 @@ SchnorrProof::prove(Scalar const& secret, ElGamalPublicKey const& pub)
 bool
 SchnorrProof::verify(ElGamalPublicKey const& pub) const
 {
+    // Reject the identity/all-zero public key before any algebra: with pub at
+    // infinity the e*Y term vanishes, so a proof for the zero secret would
+    // otherwise verify (rogue-key attack).
+    if (pub.isInfinity())
+        return false;
+
     // A' = s*G - e*Y
     ECPoint const t = ECPoint::mulBase(s_) - ECPoint::mul(e_, pub);
     auto const pb = pub.serialize();

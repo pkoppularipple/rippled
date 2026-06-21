@@ -4,6 +4,7 @@
 #include <xrpl/protocol/ECMath.h>
 
 #include <cstdint>
+#include <exception>
 #include <optional>
 #include <vector>
 
@@ -167,6 +168,36 @@ ConfidentialMPT_test::testElGamal()
     auto const sk2 = ElGamalSecretKey::random();
     BEAST_EXPECT(ct.decrypt(sk2.x, 1000) != std::optional<std::uint64_t>{42});
 
+    // Encrypting under the identity/all-zero public key is rejected. Such a key
+    // removes the k*Y mask, leaving c2 = m*G and making balances recoverable
+    // without the secret key. Both overloads route through the same guard.
+    ECPoint const idKey = ECPoint::infinity();
+    BEAST_EXPECT(idKey.isInfinity());
+    {
+        bool threw = false;
+        try
+        {
+            ElGamalCiphertext::encrypt(idKey, 1);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        BEAST_EXPECT(threw);
+    }
+    {
+        bool threw = false;
+        try
+        {
+            ElGamalCiphertext::encrypt(idKey, 1, Scalar::random());
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        BEAST_EXPECT(threw);
+    }
+
     // Serialization round-trip.
     auto const sb = ct.serialize();
     auto const back = ElGamalCiphertext::deserialize(Slice{sb.data(), sb.size()});
@@ -198,6 +229,41 @@ ConfidentialMPT_test::testSchnorr()
     tampered[0] ^= 0x01;
     auto const bad = SchnorrProof::deserialize(Slice{tampered.data(), tampered.size()});
     BEAST_EXPECT(bad.has_value() && !bad->verify(pk));
+
+    // Rogue-key guard: no proof verifies against the identity/all-zero public
+    // key. Otherwise a proof for the zero secret would verify (the e*Y term
+    // vanishes at infinity), enabling recovery of EC-ElGamal balances.
+    ECPoint const idKey = ECPoint::infinity();
+    BEAST_EXPECT(!proof.verify(idKey));
+
+    // A zero-secret forged proof must not verify either. Replicate the classic
+    // forgery (s = w, e = H(pub, w*G)) that a naive verifier would accept.
+    {
+        Scalar const w = Scalar::random();
+        ECPoint const t = ECPoint::mulBase(w);
+        auto const pb = idKey.serialize();
+        auto const tb = t.serialize();
+        char const domain[] = "XLS96-MPT/PoK/v1";
+        Scalar const e = cmpt::hashToScalar(
+            Slice{reinterpret_cast<std::uint8_t const*>(domain), sizeof(domain) - 1},
+            {Slice{pb.data(), pb.size()}, Slice{tb.data(), tb.size()}});
+        SchnorrProof const forged(e, w);
+        BEAST_EXPECT(!forged.verify(idKey));
+    }
+
+    // The prover refuses to produce a proof for a zero secret / identity key.
+    {
+        bool threw = false;
+        try
+        {
+            SchnorrProof::prove(Scalar(), idKey);
+        }
+        catch (std::exception const&)
+        {
+            threw = true;
+        }
+        BEAST_EXPECT(threw);
+    }
 }
 
 void

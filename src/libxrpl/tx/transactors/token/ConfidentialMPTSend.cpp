@@ -189,8 +189,11 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         !sleDest->isFieldPresent(sfConfidentialBalanceInbox))
         return tecNO_PERMISSION;
 
+    // The auditor ciphertext is mandatory when an auditor key is configured,
+    // and forbidden otherwise: a non-audited issuance must not accept an
+    // unverified auditor mirror.
     bool const hasAuditor = sleIssuance->isFieldPresent(sfAuditorEncryptionKey);
-    if (hasAuditor && !ctx.tx.isFieldPresent(sfAuditorEncryptedAmount))
+    if (hasAuditor != ctx.tx.isFieldPresent(sfAuditorEncryptedAmount))
         return tecNO_PERMISSION;
 
     MPTIssue const mptIssue{id};
@@ -264,7 +267,12 @@ ConfidentialMPTSend::doApply()
     if (!sleSender || !sleDest)
         return tecINTERNAL;  // LCOV_EXCL_LINE
 
-    bool const hasAuditor = ctx_.tx.isFieldPresent(sfAuditorEncryptedAmount);
+    // Mirror the auditor ciphertext only when the issuance actually has an
+    // auditor key, not merely when the tx field is present.
+    auto const sleIssuance = view().read(keylet::mptIssuance(id));
+    bool const hasAuditor = sleIssuance &&
+        sleIssuance->isFieldPresent(sfAuditorEncryptionKey) &&
+        ctx_.tx.isFieldPresent(sfAuditorEncryptedAmount);
     auto txCt = [&](auto const& f) {
         return *cmpt::ElGamalCiphertext::deserialize(ctx_.tx[f]);
     };

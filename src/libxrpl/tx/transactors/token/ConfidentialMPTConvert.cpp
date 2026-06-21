@@ -86,9 +86,11 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
     if (!sleIssuance->isFieldPresent(sfIssuerEncryptionKey))
         return tecNO_PERMISSION;
 
-    // The auditor ciphertext is mandatory when an auditor key is configured.
+    // The auditor ciphertext is mandatory when an auditor key is configured,
+    // and forbidden otherwise: a non-audited issuance must not accept an
+    // unverified auditor mirror.
     bool const hasAuditor = sleIssuance->isFieldPresent(sfAuditorEncryptionKey);
-    if (hasAuditor && !ctx.tx.isFieldPresent(sfAuditorEncryptedAmount))
+    if (hasAuditor != ctx.tx.isFieldPresent(sfAuditorEncryptedAmount))
         return tecNO_PERMISSION;
 
     auto const sleToken =
@@ -208,7 +210,8 @@ ConfidentialMPTConvert::doApply()
     writeCt(
         sfIssuerEncryptedBalance,
         readCt(sfIssuerEncryptedBalance) + txCt(sfIssuerEncryptedAmount));
-    if (ctx_.tx.isFieldPresent(sfAuditorEncryptedAmount))
+    if (sleIssuance->isFieldPresent(sfAuditorEncryptionKey) &&
+        ctx_.tx.isFieldPresent(sfAuditorEncryptedAmount))
         writeCt(
             sfAuditorEncryptedBalance,
             readCt(sfAuditorEncryptedBalance) + txCt(sfAuditorEncryptedAmount));

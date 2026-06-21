@@ -42,7 +42,8 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
         std::uint64_t amount,
         cmpt::ECPoint const& holderPub,
         cmpt::ECPoint const& issuerPub,
-        std::optional<cmpt::Scalar> const& holderSecret)
+        std::optional<cmpt::Scalar> const& holderSecret,
+        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt)
     {
         cmpt::Scalar const k = cmpt::Scalar::random();
         auto const holderCt = cmpt::ElGamalCiphertext::encrypt(holderPub, amount, k);
@@ -56,6 +57,11 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
         jv[sfHolderEncryptedAmount] = hexOf(holderCt.serialize());
         jv[sfIssuerEncryptedAmount] = hexOf(issuerCt.serialize());
         jv[sfBlindingFactor] = hexOf(k.bytes());
+        // The auditor mirror shares the disclosed blinding factor so that
+        // deterministic verification reconstructs it exactly.
+        if (auditorPub)
+            jv[sfAuditorEncryptedAmount] =
+                hexOf(cmpt::ElGamalCiphertext::encrypt(*auditorPub, amount, k).serialize());
         if (holderSecret)
         {
             jv[sfHolderEncryptionKey] = hexOf(holderPub.serialize());
@@ -153,7 +159,8 @@ private:
         cmpt::ECPoint const& senderPub,
         cmpt::ECPoint const& destPub,
         cmpt::ECPoint const& issuerPub,
-        cmpt::ElGamalCiphertext const& senderSpending);
+        cmpt::ElGamalCiphertext const& senderSpending,
+        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt);
 
     static cmpt::ElGamalCiphertext
     readSpending(jtx::Env& env, MPTID const& id, jtx::Account const& a);
@@ -181,7 +188,8 @@ ConfidentialMPTSendPath_test::sendJV(
     cmpt::ECPoint const& senderPub,
     cmpt::ECPoint const& destPub,
     cmpt::ECPoint const& issuerPub,
-    cmpt::ElGamalCiphertext const& senderSpending)
+    cmpt::ElGamalCiphertext const& senderSpending,
+    std::optional<cmpt::ECPoint> const& auditorPub)
 {
     using namespace cmpt;
     Scalar const kt = Scalar::random();
@@ -207,12 +215,26 @@ ConfidentialMPTSendPath_test::sendJV(
     auto const peqIssuer = PlaintextEqualityProof::prove(
         senderPub, issuerPub, amount, kt, ki, senderCt, issuerCt);
 
+    // Optional auditor mirror: a fresh ciphertext plus its equality proof,
+    // serialized between the issuer proof and the linkage proofs.
+    std::optional<ElGamalCiphertext> auditorCt;
+    std::optional<PlaintextEqualityProof> peqAuditor;
+    if (auditorPub)
+    {
+        Scalar const ka = Scalar::random();
+        auditorCt = ElGamalCiphertext::encrypt(*auditorPub, amount, ka);
+        peqAuditor = PlaintextEqualityProof::prove(
+            senderPub, *auditorPub, amount, kt, ka, senderCt, *auditorCt);
+    }
+
     Blob bundle;
     auto append = [&](auto const& a) {
         bundle.insert(bundle.end(), a.begin(), a.end());
     };
     append(peqDest.serialize());
     append(peqIssuer.serialize());
+    if (peqAuditor)
+        append(peqAuditor->serialize());
     append(linkAmount.serialize());
     append(linkBalance.serialize());
     append(rangeAmount.serialize());
@@ -226,6 +248,8 @@ ConfidentialMPTSendPath_test::sendJV(
     jv[sfSenderEncryptedAmount] = hexOf(senderCt.serialize());
     jv[sfDestinationEncryptedAmount] = hexOf(destCt.serialize());
     jv[sfIssuerEncryptedAmount] = hexOf(issuerCt.serialize());
+    if (auditorCt)
+        jv[sfAuditorEncryptedAmount] = hexOf(auditorCt->serialize());
     jv[sfAmountCommitment] = hexOf(amountCommit.serialize());
     jv[sfBalanceCommitment] = hexOf(balanceCommit.serialize());
     jv[sfZKProof] = strHex(bundle);
@@ -296,6 +320,40 @@ ConfidentialMPTSendPath_test::testConvertSuccess(FeatureBitset features)
         mpt.pay(alice, bob, 1000);
         env(convertJV(bob, mpt.issuanceID(), 2000, bobPub, issuerPub, bobSk.x),
             Ter(tecINSUFFICIENT_FUNDS));
+    }
+
+    // Audited issuance: a valid auditor ciphertext is accepted and mirrored.
+    {
+        Env env{*this, features};
+        auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
+        MPTTester mpt(env, alice, {.holders = {bob}});
+        mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+        mpt.set(
+            {.account = alice,
+             .issuerEncryptionKey = rawStr(issuerPub.serialize()),
+             .auditorEncryptionKey = rawStr(auditorPub.serialize())});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 1000);
+        auto const id = mpt.issuanceID();
+        env(convertJV(bob, id, 400, bobPub, issuerPub, bobSk.x, auditorPub));
+        env.close();
+        auto const tok = env.le(keylet::mptoken(id, bob.id()));
+        BEAST_EXPECT(tok && tok->isFieldPresent(sfAuditorEncryptedBalance));
+    }
+
+    // Non-audited issuance must reject an attached auditor ciphertext: an
+    // issuance with no auditor key may not accept an unverified auditor mirror.
+    {
+        Env env{*this, features};
+        auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
+        MPTTester mpt(env, alice, {.holders = {bob}});
+        mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+        mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 1000);
+        env(convertJV(
+                bob, mpt.issuanceID(), 400, bobPub, issuerPub, bobSk.x, auditorPub),
+            Ter(tecNO_PERMISSION));
     }
 }
 
@@ -415,6 +473,52 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         proof[0] ^= 0x01;
         jv[sfZKProof] = strHex(proof);
         env(jv, Ter(tecBAD_PROOF));
+    }
+
+    // Audited issuance: the auditor mirror moves with a valid auditor
+    // ciphertext and proof.
+    {
+        Env env{*this, features};
+        auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
+        MPTTester mpt(env, alice, {.holders = {bob, carol}});
+        mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+        mpt.set(
+            {.account = alice,
+             .issuerEncryptionKey = rawStr(issuerPub.serialize()),
+             .auditorEncryptionKey = rawStr(auditorPub.serialize())});
+        mpt.authorize({.account = bob});
+        mpt.authorize({.account = carol});
+        mpt.pay(alice, bob, 1000);
+        auto const id = mpt.issuanceID();
+        env(convertJV(bob, id, 1000, bobPub, issuerPub, bobSk.x, auditorPub));
+        env.close();
+        env(mergeJV(bob, id));
+        env.close();
+        env(convertJV(carol, id, 0, carolPub, issuerPub, carolSk.x, auditorPub));
+        env.close();
+        env(mergeJV(carol, id));
+        env.close();
+
+        env(sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob), auditorPub));
+        env.close();
+        auto const tok = env.le(keylet::mptoken(id, carol.id()));
+        BEAST_EXPECT(tok && tok->isFieldPresent(sfAuditorEncryptedBalance));
+    }
+
+    // Non-audited issuance must reject an attached auditor ciphertext: an
+    // issuance with no auditor key may not accept an unverified auditor mirror.
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
+        auto jv = sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        jv[sfAuditorEncryptedAmount] =
+            hexOf(cmpt::ElGamalCiphertext::encrypt(auditorPub, 400).serialize());
+        env(jv, Ter(tecNO_PERMISSION));
     }
 
     // Amendment-gated.

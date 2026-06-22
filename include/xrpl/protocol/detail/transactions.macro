@@ -1080,8 +1080,7 @@ TRANSACTION(ttLOAN_PAY, 84, LoanPay,
 }))
 
 /** This transaction converts a holder's public MPT balance into confidential
-    form (XLS-0096). Transaction type 89 (Clawback) is reserved for a later
-    slice. */
+    form (XLS-0096). */
 #if TRANSACTION_INCLUDE
 #   include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
 #endif
@@ -1151,6 +1150,23 @@ TRANSACTION(ttMPTOKEN_CONVERT_BACK, 87, ConfidentialMPTConvertBack,
     {sfAuditorEncryptedAmount, SoeOptional},
     {sfBlindingFactor, SoeRequired},
     {sfBalanceCommitment, SoeRequired},
+    {sfZKProof, SoeRequired},
+}))
+
+/** This transaction lets an issuer claw back a holder's entire confidential MPT
+    balance, burning it from circulation (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTClawback.h>
+#endif
+TRANSACTION(ttMPTOKEN_CLAWBACK_CONFIDENTIAL, 89, ConfidentialMPTClawback,
+    Delegation::NotDelegable,
+    featureConfidentialMPT,
+    NoPriv,
+    ({
+    {sfMPTokenIssuanceID, SoeRequired},
+    {sfHolder, SoeRequired},
+    {sfMPTAmount, SoeRequired},
+    {sfBlindingFactor, SoeRequired},
     {sfZKProof, SoeRequired},
 }))
 

@@ -100,6 +100,12 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
     if (coa < amount)
         return tecINSUFFICIENT_FUNDS;
 
+    // The public supply must likewise cover the burn: sfOutstandingAmount is
+    // always present on an issuance, and guarding it here ensures doApply()'s
+    // `oa - amount` can never underflow on an inconsistent issuance.
+    if (sleIssuance->getFieldU64(sfOutstandingAmount) < amount)
+        return tecINSUFFICIENT_FUNDS;
+
     auto const issuerKeyBlob = sleIssuance->getFieldVL(sfIssuerEncryptionKey);
     auto const issuerKey =
         cmpt::ECPoint::deserialize(Slice{issuerKeyBlob.data(), issuerKeyBlob.size()});

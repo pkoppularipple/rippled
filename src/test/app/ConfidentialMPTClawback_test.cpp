@@ -4,15 +4,18 @@
 #include <xrpl/basics/Slice.h>
 #include <xrpl/basics/StringUtilities.h>
 #include <xrpl/basics/strHex.h>
+#include <xrpl/ledger/OpenView.h>
 #include <xrpl/protocol/ConfidentialMPT.h>
 #include <xrpl/protocol/ECMath.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
 #include <xrpl/protocol/SField.h>
+#include <xrpl/protocol/STLedgerEntry.h>
 #include <xrpl/protocol/jss.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 
@@ -260,6 +263,30 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env, 400);
         env(clawbackJV(alice, bob, id, 500, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance)),
+            Ter(tecINSUFFICIENT_FUNDS));
+    }
+
+    // An issuance whose public OutstandingAmount is below the burned amount is
+    // rejected rather than wrapping the public supply. A well-formed ledger
+    // keeps OA >= COA, so the inconsistent state is poked directly into the
+    // issuance SLE; the confidential supply still covers the burn, so this
+    // exercises the public-supply guard specifically (not the COA guard).
+    {
+        Env env{*this, features};
+        auto const id = setup(env, 400);
+        env.app().getOpenLedger().modify(
+            [&](OpenView& view, beast::Journal) {
+                auto const sle = view.read(keylet::mptIssuance(id));
+                if (!sle)
+                    return false;
+                auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                (*replacement)[sfOutstandingAmount] = 100;  // below the 400 burn
+                view.rawReplace(replacement);
+                return true;
+            });
+        env(clawbackJV(
+                alice, bob, id, 400, issuerSk.x,
+                readCt(env, id, bob, sfIssuerEncryptedBalance)),
             Ter(tecINSUFFICIENT_FUNDS));
     }
 

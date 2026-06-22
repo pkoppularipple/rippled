@@ -137,6 +137,12 @@ ElGamalCiphertext::operator+(ElGamalCiphertext const& o) const
     return ElGamalCiphertext{c1_ + o.c1_, c2_ + o.c2_};
 }
 
+ElGamalCiphertext
+ElGamalCiphertext::operator-(ElGamalCiphertext const& o) const
+{
+    return ElGamalCiphertext{c1_ - o.c1_, c2_ - o.c2_};
+}
+
 ECPoint
 ElGamalCiphertext::decryptToPoint(Scalar const& secret) const
 {
@@ -449,6 +455,233 @@ RangeProof::deserialize(Slice const& in)
         proof.bitProofs_.push_back(BitProof{*c, c0, c1, z0, z1});
     }
     return proof;
+}
+
+//------------------------------------------------------------------------------
+// LinkageProof (secret-key ElGamal <-> Pedersen linkage)
+//------------------------------------------------------------------------------
+
+LinkageProof
+LinkageProof::prove(
+    Scalar const& secret,
+    std::uint64_t value,
+    Scalar const& blind,
+    ElGamalCiphertext const& ct,
+    PedersenCommitment const& commitment)
+{
+    ECPoint const H = ECPoint::generatorH();
+    ECPoint const Y = ECPoint::mulBase(secret);
+    Scalar const m(value);
+
+    Scalar const a = Scalar::random();  // for the secret key x
+    Scalar const b = Scalar::random();  // for the value m
+    Scalar const d = Scalar::random();  // for the blinding r
+
+    ECPoint const t1 = ECPoint::mulBase(a);
+    ECPoint const t2 = ECPoint::mulBase(b) + ECPoint::mul(a, ct.c1());
+    ECPoint const t3 = ECPoint::mulBase(b) + ECPoint::mul(d, H);
+
+    auto const yb = Y.serialize();
+    auto const c1b = ct.c1().serialize();
+    auto const c2b = ct.c2().serialize();
+    auto const pb = commitment.point().serialize();
+    auto const t1b = t1.serialize();
+    auto const t2b = t2.serialize();
+    auto const t3b = t3.serialize();
+    Scalar const e = hashToScalar(
+        lit("XLS96-MPT/link/v1"),
+        {Slice{yb.data(), yb.size()},
+         Slice{c1b.data(), c1b.size()},
+         Slice{c2b.data(), c2b.size()},
+         Slice{pb.data(), pb.size()},
+         Slice{t1b.data(), t1b.size()},
+         Slice{t2b.data(), t2b.size()},
+         Slice{t3b.data(), t3b.size()}});
+
+    Scalar const zx = a + e * secret;
+    Scalar const zm = b + e * m;
+    Scalar const zr = d + e * blind;
+    return LinkageProof{e, zx, zm, zr};
+}
+
+bool
+LinkageProof::verify(
+    ElGamalPublicKey const& pub,
+    ElGamalCiphertext const& ct,
+    PedersenCommitment const& commitment) const
+{
+    // Reject the identity public key: with Y at infinity the e*Y term vanishes
+    // and a proof for the zero secret could otherwise verify.
+    if (pub.isInfinity())
+        return false;
+
+    ECPoint const H = ECPoint::generatorH();
+
+    ECPoint const t1 = ECPoint::mulBase(zx_) - ECPoint::mul(e_, pub);
+    ECPoint const t2 = ECPoint::mulBase(zm_) + ECPoint::mul(zx_, ct.c1()) -
+        ECPoint::mul(e_, ct.c2());
+    ECPoint const t3 = ECPoint::mulBase(zm_) + ECPoint::mul(zr_, H) -
+        ECPoint::mul(e_, commitment.point());
+
+    auto const yb = pub.serialize();
+    auto const c1b = ct.c1().serialize();
+    auto const c2b = ct.c2().serialize();
+    auto const pb = commitment.point().serialize();
+    auto const t1b = t1.serialize();
+    auto const t2b = t2.serialize();
+    auto const t3b = t3.serialize();
+    Scalar const e = hashToScalar(
+        lit("XLS96-MPT/link/v1"),
+        {Slice{yb.data(), yb.size()},
+         Slice{c1b.data(), c1b.size()},
+         Slice{c2b.data(), c2b.size()},
+         Slice{pb.data(), pb.size()},
+         Slice{t1b.data(), t1b.size()},
+         Slice{t2b.data(), t2b.size()},
+         Slice{t3b.data(), t3b.size()}});
+    return e == e_;
+}
+
+std::array<std::uint8_t, LinkageProof::kSize>
+LinkageProof::serialize() const
+{
+    std::array<std::uint8_t, kSize> out{};
+    std::memcpy(out.data(), e_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + kScalarSize, zx_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 2 * kScalarSize, zm_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 3 * kScalarSize, zr_.bytes().data(), kScalarSize);
+    return out;
+}
+
+std::optional<LinkageProof>
+LinkageProof::deserialize(Slice const& in)
+{
+    if (in.size() != kSize)
+        return std::nullopt;
+    Scalar const e{Slice{in.data(), kScalarSize}};
+    Scalar const zx{Slice{in.data() + kScalarSize, kScalarSize}};
+    Scalar const zm{Slice{in.data() + 2 * kScalarSize, kScalarSize}};
+    Scalar const zr{Slice{in.data() + 3 * kScalarSize, kScalarSize}};
+    return LinkageProof{e, zx, zm, zr};
+}
+
+//------------------------------------------------------------------------------
+// PlaintextEqualityProof (two EC-ElGamal ciphertexts, same plaintext)
+//------------------------------------------------------------------------------
+
+PlaintextEqualityProof
+PlaintextEqualityProof::prove(
+    ElGamalPublicKey const& pub1,
+    ElGamalPublicKey const& pub2,
+    std::uint64_t value,
+    Scalar const& k1,
+    Scalar const& k2,
+    ElGamalCiphertext const& ct1,
+    ElGamalCiphertext const& ct2)
+{
+    Scalar const m(value);
+
+    Scalar const wm = Scalar::random();
+    Scalar const w1 = Scalar::random();
+    Scalar const w2 = Scalar::random();
+
+    ECPoint const a1 = ECPoint::mulBase(w1);
+    ECPoint const a2 = ECPoint::mulBase(wm) + ECPoint::mul(w1, pub1);
+    ECPoint const b1 = ECPoint::mulBase(w2);
+    ECPoint const b2 = ECPoint::mulBase(wm) + ECPoint::mul(w2, pub2);
+
+    auto const y1b = pub1.serialize();
+    auto const y2b = pub2.serialize();
+    auto const c1a = ct1.c1().serialize();
+    auto const c1b = ct1.c2().serialize();
+    auto const c2a = ct2.c1().serialize();
+    auto const c2b = ct2.c2().serialize();
+    auto const a1b = a1.serialize();
+    auto const a2b = a2.serialize();
+    auto const b1b = b1.serialize();
+    auto const b2b = b2.serialize();
+    Scalar const e = hashToScalar(
+        lit("XLS96-MPT/pteq/v1"),
+        {Slice{y1b.data(), y1b.size()},
+         Slice{y2b.data(), y2b.size()},
+         Slice{c1a.data(), c1a.size()},
+         Slice{c1b.data(), c1b.size()},
+         Slice{c2a.data(), c2a.size()},
+         Slice{c2b.data(), c2b.size()},
+         Slice{a1b.data(), a1b.size()},
+         Slice{a2b.data(), a2b.size()},
+         Slice{b1b.data(), b1b.size()},
+         Slice{b2b.data(), b2b.size()}});
+
+    Scalar const zm = wm + e * m;
+    Scalar const z1 = w1 + e * k1;
+    Scalar const z2 = w2 + e * k2;
+    return PlaintextEqualityProof{e, zm, z1, z2};
+}
+
+bool
+PlaintextEqualityProof::verify(
+    ElGamalPublicKey const& pub1,
+    ElGamalPublicKey const& pub2,
+    ElGamalCiphertext const& ct1,
+    ElGamalCiphertext const& ct2) const
+{
+    if (pub1.isInfinity() || pub2.isInfinity())
+        return false;
+
+    ECPoint const a1 = ECPoint::mulBase(z1_) - ECPoint::mul(e_, ct1.c1());
+    ECPoint const a2 = ECPoint::mulBase(zm_) + ECPoint::mul(z1_, pub1) -
+        ECPoint::mul(e_, ct1.c2());
+    ECPoint const b1 = ECPoint::mulBase(z2_) - ECPoint::mul(e_, ct2.c1());
+    ECPoint const b2 = ECPoint::mulBase(zm_) + ECPoint::mul(z2_, pub2) -
+        ECPoint::mul(e_, ct2.c2());
+
+    auto const y1b = pub1.serialize();
+    auto const y2b = pub2.serialize();
+    auto const c1a = ct1.c1().serialize();
+    auto const c1b = ct1.c2().serialize();
+    auto const c2a = ct2.c1().serialize();
+    auto const c2b = ct2.c2().serialize();
+    auto const a1b = a1.serialize();
+    auto const a2b = a2.serialize();
+    auto const b1b = b1.serialize();
+    auto const b2b = b2.serialize();
+    Scalar const e = hashToScalar(
+        lit("XLS96-MPT/pteq/v1"),
+        {Slice{y1b.data(), y1b.size()},
+         Slice{y2b.data(), y2b.size()},
+         Slice{c1a.data(), c1a.size()},
+         Slice{c1b.data(), c1b.size()},
+         Slice{c2a.data(), c2a.size()},
+         Slice{c2b.data(), c2b.size()},
+         Slice{a1b.data(), a1b.size()},
+         Slice{a2b.data(), a2b.size()},
+         Slice{b1b.data(), b1b.size()},
+         Slice{b2b.data(), b2b.size()}});
+    return e == e_;
+}
+
+std::array<std::uint8_t, PlaintextEqualityProof::kSize>
+PlaintextEqualityProof::serialize() const
+{
+    std::array<std::uint8_t, kSize> out{};
+    std::memcpy(out.data(), e_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + kScalarSize, zm_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 2 * kScalarSize, z1_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 3 * kScalarSize, z2_.bytes().data(), kScalarSize);
+    return out;
+}
+
+std::optional<PlaintextEqualityProof>
+PlaintextEqualityProof::deserialize(Slice const& in)
+{
+    if (in.size() != kSize)
+        return std::nullopt;
+    Scalar const e{Slice{in.data(), kScalarSize}};
+    Scalar const zm{Slice{in.data() + kScalarSize, kScalarSize}};
+    Scalar const z1{Slice{in.data() + 2 * kScalarSize, kScalarSize}};
+    Scalar const z2{Slice{in.data() + 3 * kScalarSize, kScalarSize}};
+    return PlaintextEqualityProof{e, zm, z1, z2};
 }
 
 }  // namespace cmpt

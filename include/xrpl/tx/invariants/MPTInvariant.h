@@ -46,7 +46,14 @@ public:
 /** Verify:
  *    - OutstandingAmount <= MaximumAmount for any MPT
  *    - OutstandingAmount after = OutstandingAmount before +
- *         sum (MPT after - MPT before) - this is total MPT credit/debit
+ *         sum (MPT after - MPT before) + (COA after - COA before)
+ *
+ * The ConfidentialOutstandingAmount (COA) term keeps the accounting consistent
+ * for XLS-0096 confidential conversions: a ConfidentialMPTConvert debits a
+ * holder's public MPTAmount and credits the confidential balance, increasing
+ * COA by the same amount while OutstandingAmount is unchanged (ΔOA == ΣΔMPT +
+ * ΔCOA == 0). For non-confidential MPTs the COA field is absent and the term
+ * is zero, preserving the original invariant.
  */
 class ValidMPTPayment
 {
@@ -54,6 +61,8 @@ class ValidMPTPayment
     struct MPTData
     {
         std::array<std::int64_t, 2> outstanding{};
+        // ConfidentialOutstandingAmount before/after (0 when absent)
+        std::array<std::int64_t, 2> coa{};
         // sum (MPT after - MPT before)
         std::int64_t mptAmount{0};
     };

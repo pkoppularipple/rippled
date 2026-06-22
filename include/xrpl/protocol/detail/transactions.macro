@@ -1079,6 +1079,61 @@ TRANSACTION(ttLOAN_PAY, 84, LoanPay,
     {sfAmount, SoeRequired, SoeMptSupported},
 }))
 
+/** This transaction converts a holder's public MPT balance into confidential
+    form (XLS-0096). Transaction type 87 (ConvertBack) and 89 (Clawback) are
+    reserved for a later slice. */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
+#endif
+TRANSACTION(ttMPTOKEN_CONVERT, 85, ConfidentialMPTConvert,
+    Delegation::NotDelegable,
+    featureConfidentialMPT,
+    NoPriv,
+    ({
+    {sfMPTokenIssuanceID, SoeRequired},
+    {sfMPTAmount, SoeRequired},
+    {sfHolderEncryptionKey, SoeOptional},
+    {sfHolderEncryptedAmount, SoeRequired},
+    {sfIssuerEncryptedAmount, SoeRequired},
+    {sfAuditorEncryptedAmount, SoeOptional},
+    {sfBlindingFactor, SoeRequired},
+    {sfZKProof, SoeOptional},
+}))
+
+/** This transaction merges a holder's confidential inbox balance into their
+    spending balance (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
+#endif
+TRANSACTION(ttMPTOKEN_MERGE_INBOX, 86, ConfidentialMPTMergeInbox,
+    Delegation::NotDelegable,
+    featureConfidentialMPT,
+    NoPriv,
+    ({
+    {sfMPTokenIssuanceID, SoeRequired},
+}))
+
+/** This transaction performs a confidential transfer of MPT value between
+    accounts with the amount hidden (XLS-0096). */
+#if TRANSACTION_INCLUDE
+#   include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
+#endif
+TRANSACTION(ttMPTOKEN_CONFIDENTIAL_SEND, 88, ConfidentialMPTSend,
+    Delegation::NotDelegable,
+    featureConfidentialMPT,
+    NoPriv,
+    ({
+    {sfMPTokenIssuanceID, SoeRequired},
+    {sfDestination, SoeRequired},
+    {sfSenderEncryptedAmount, SoeRequired},
+    {sfDestinationEncryptedAmount, SoeRequired},
+    {sfIssuerEncryptedAmount, SoeRequired},
+    {sfAuditorEncryptedAmount, SoeOptional},
+    {sfAmountCommitment, SoeRequired},
+    {sfBalanceCommitment, SoeRequired},
+    {sfZKProof, SoeRequired},
+}))
+
 /** This system-generated transaction type is used to update the status of the various amendments.
 
     For details, see: https://xrpl.org/amendments.html

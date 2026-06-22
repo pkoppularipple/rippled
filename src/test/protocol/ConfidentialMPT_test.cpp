@@ -19,6 +19,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
     using ElGamalCiphertext = cmpt::ElGamalCiphertext;
     using SchnorrProof = cmpt::SchnorrProof;
     using RangeProof = cmpt::RangeProof;
+    using LinkageProof = cmpt::LinkageProof;
+    using PlaintextEqualityProof = cmpt::PlaintextEqualityProof;
 
     void
     testScalar()
@@ -125,6 +127,8 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
         testElGamal();
         testSchnorr();
         testRangeProof();
+        testLinkageProof();
+        testPlaintextEqualityProof();
     }
 
     void
@@ -133,6 +137,10 @@ class ConfidentialMPT_test : public beast::unit_test::Suite
     testSchnorr();
     void
     testRangeProof();
+    void
+    testLinkageProof();
+    void
+    testPlaintextEqualityProof();
 };
 
 void
@@ -308,6 +316,106 @@ ConfidentialMPT_test::testRangeProof()
         auto const [pm, cm] = RangeProof::prove(65535, rm, bits);
         BEAST_EXPECT(pm.verify(cm));
     }
+}
+
+void
+ConfidentialMPT_test::testLinkageProof()
+{
+    testcase("ElGamal-Pedersen linkage proof");
+
+    auto const sk = ElGamalSecretKey::random();
+    auto const pk = sk.publicKey();
+
+    std::uint64_t const value = 4242;
+    Scalar const k = Scalar::random();    // ciphertext randomness
+    Scalar const r = Scalar::random();    // commitment blinding
+
+    auto const ct = ElGamalCiphertext::encrypt(pk, value, k);
+    auto const commitment = PedersenCommitment::commit(value, r);
+
+    auto const proof = LinkageProof::prove(sk.x, value, r, ct, commitment);
+    BEAST_EXPECT(proof.verify(pk, ct, commitment));
+
+    // Wrong public key fails.
+    auto const otherSk = ElGamalSecretKey::random();
+    BEAST_EXPECT(!proof.verify(otherSk.publicKey(), ct, commitment));
+
+    // A commitment to a different value fails (the value is no longer linked).
+    auto const otherCommit = PedersenCommitment::commit(value + 1, r);
+    BEAST_EXPECT(!proof.verify(pk, ct, otherCommit));
+
+    // A ciphertext of a different value fails.
+    auto const otherCt = ElGamalCiphertext::encrypt(pk, value + 1, k);
+    BEAST_EXPECT(!proof.verify(pk, otherCt, commitment));
+
+    // The identity public key never verifies (rogue-key guard).
+    BEAST_EXPECT(!proof.verify(ECPoint::infinity(), ct, commitment));
+
+    // Serialization round-trip preserves verification.
+    auto const sb = proof.serialize();
+    auto const back = LinkageProof::deserialize(Slice{sb.data(), sb.size()});
+    BEAST_EXPECT(back.has_value() && back->verify(pk, ct, commitment));
+
+    // Tampering with a response scalar breaks verification.
+    auto tampered = sb;
+    tampered[cmpt::kScalarSize] ^= 0x01;  // first byte of zx
+    auto const bad = LinkageProof::deserialize(Slice{tampered.data(), tampered.size()});
+    BEAST_EXPECT(bad.has_value() && !bad->verify(pk, ct, commitment));
+
+    // Wrong-size blob fails to deserialize.
+    BEAST_EXPECT(!LinkageProof::deserialize(Slice{sb.data(), sb.size() - 1}).has_value());
+}
+
+void
+ConfidentialMPT_test::testPlaintextEqualityProof()
+{
+    testcase("Plaintext-equality proof");
+
+    auto const sk1 = ElGamalSecretKey::random();
+    auto const sk2 = ElGamalSecretKey::random();
+    auto const pk1 = sk1.publicKey();
+    auto const pk2 = sk2.publicKey();
+
+    std::uint64_t const value = 999;
+    Scalar const k1 = Scalar::random();
+    Scalar const k2 = Scalar::random();
+
+    auto const ct1 = ElGamalCiphertext::encrypt(pk1, value, k1);
+    auto const ct2 = ElGamalCiphertext::encrypt(pk2, value, k2);
+
+    auto const proof =
+        PlaintextEqualityProof::prove(pk1, pk2, value, k1, k2, ct1, ct2);
+    BEAST_EXPECT(proof.verify(pk1, pk2, ct1, ct2));
+
+    // Two ciphertexts encrypting different plaintexts must not produce a
+    // verifying equality proof.
+    auto const ct2bad = ElGamalCiphertext::encrypt(pk2, value + 1, k2);
+    auto const badProof =
+        PlaintextEqualityProof::prove(pk1, pk2, value, k1, k2, ct1, ct2bad);
+    BEAST_EXPECT(!badProof.verify(pk1, pk2, ct1, ct2bad));
+
+    // Swapping the ciphertexts / keys fails.
+    BEAST_EXPECT(!proof.verify(pk2, pk1, ct1, ct2));
+    BEAST_EXPECT(!proof.verify(pk1, pk2, ct2, ct1));
+
+    // Identity key guard.
+    BEAST_EXPECT(!proof.verify(ECPoint::infinity(), pk2, ct1, ct2));
+
+    // Serialization round-trip preserves verification.
+    auto const sb = proof.serialize();
+    auto const back =
+        PlaintextEqualityProof::deserialize(Slice{sb.data(), sb.size()});
+    BEAST_EXPECT(back.has_value() && back->verify(pk1, pk2, ct1, ct2));
+
+    // Tampering breaks verification.
+    auto tampered = sb;
+    tampered[0] ^= 0x01;  // first byte of challenge e
+    auto const bad =
+        PlaintextEqualityProof::deserialize(Slice{tampered.data(), tampered.size()});
+    BEAST_EXPECT(bad.has_value() && !bad->verify(pk1, pk2, ct1, ct2));
+
+    BEAST_EXPECT(
+        !PlaintextEqualityProof::deserialize(Slice{sb.data(), sb.size() - 1}).has_value());
 }
 
 BEAST_DEFINE_TESTSUITE(ConfidentialMPT, protocol, xrpl);

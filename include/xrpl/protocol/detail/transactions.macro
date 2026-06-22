@@ -1080,8 +1080,8 @@ TRANSACTION(ttLOAN_PAY, 84, LoanPay,
 }))
 
 /** This transaction converts a holder's public MPT balance into confidential
-    form (XLS-0096). Transaction type 87 (ConvertBack) and 89 (Clawback) are
-    reserved for a later slice. */
+    form (XLS-0096). Transaction type 89 (Clawback) is reserved for a later
+    slice. */
 #if TRANSACTION_INCLUDE
 #   include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
 #endif

@@ -279,7 +279,12 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
                 auto const sle = view.read(keylet::mptIssuance(id));
                 if (!sle)
                     return false;
-                auto replacement = std::make_shared<SLE>(*sle, sle->key());
+                // Copy the entry verbatim rather than via the
+                // STObject-conversion constructor: the issuance carries a
+                // non-present soeDEFAULT TransferFee placeholder, and
+                // re-applying the template (as that constructor does) would
+                // reject it as "explicitly set to default".
+                auto replacement = std::make_shared<SLE>(*sle);
                 (*replacement)[sfOutstandingAmount] = 100;  // below the 400 burn
                 view.rawReplace(replacement);
                 return true;

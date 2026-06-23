@@ -277,7 +277,7 @@ ConfidentialMPT_test::testSchnorr()
 void
 ConfidentialMPT_test::testRangeProof()
 {
-    testcase("Bit-decomposition range proof");
+    testcase("Aggregated Bulletproof range proof");
 
     std::uint8_t const bits = 16;
     Scalar const blind = Scalar::random();
@@ -285,6 +285,9 @@ ConfidentialMPT_test::testRangeProof()
 
     auto const [proof, commitment] = RangeProof::prove(value, blind, bits);
     BEAST_EXPECT(proof.verify(commitment));
+
+    // Logarithmic proof size: serialized length grows with log2(bits), not bits.
+    BEAST_EXPECT(proof.serialize().size() == RangeProof::serializedSize(bits));
 
     // The proof is bound to its commitment: a different commitment fails.
     auto const otherCommit =
@@ -296,11 +299,19 @@ ConfidentialMPT_test::testRangeProof()
     auto const back = RangeProof::deserialize(Slice{sb.data(), sb.size()});
     BEAST_EXPECT(back.has_value() && back->verify(commitment));
 
-    // Tampering with a response scalar breaks verification.
+    // Tampering with the tauX scalar (first scalar after A, S, T1, T2) breaks
+    // verification.
     auto tampered = sb;
-    tampered[1 + cmpt::kPointSize] ^= 0x01;  // first challenge byte of bit 0
+    tampered[1 + 4 * cmpt::kPointSize] ^= 0x01;
     auto const bad = RangeProof::deserialize(Slice{tampered.data(), tampered.size()});
     BEAST_EXPECT(bad.has_value() && !bad->verify(commitment));
+
+    // Tampering with the folded inner-product scalar a (last but one scalar)
+    // also breaks verification.
+    auto tampered2 = sb;
+    tampered2[sb.size() - 1] ^= 0x01;  // last byte of ipb
+    auto const bad2 = RangeProof::deserialize(Slice{tampered2.data(), tampered2.size()});
+    BEAST_EXPECT(bad2.has_value() && !bad2->verify(commitment));
 
     // A value outside [0, 2^bits) cannot produce a verifying proof.
     auto const [badProof, badCommit] =
@@ -315,6 +326,70 @@ ConfidentialMPT_test::testRangeProof()
         Scalar const rm = Scalar::random();
         auto const [pm, cm] = RangeProof::prove(65535, rm, bits);
         BEAST_EXPECT(pm.verify(cm));
+    }
+
+    // Full 64-bit width: boundaries 0 and 2^64 - 1 verify and round-trip.
+    {
+        std::uint8_t const w = 64;
+        Scalar const r0 = Scalar::random();
+        auto const [p0, c0] = RangeProof::prove(0, r0, w);
+        BEAST_EXPECT(p0.verify(c0));
+
+        Scalar const rmax = Scalar::random();
+        std::uint64_t const vmax = ~std::uint64_t{0};  // 2^64 - 1
+        auto const [pm, cm] = RangeProof::prove(vmax, rmax, w);
+        BEAST_EXPECT(pm.verify(cm));
+
+        auto const sb64 = pm.serialize();
+        BEAST_EXPECT(sb64.size() == RangeProof::serializedSize(w));
+        auto const back64 = RangeProof::deserialize(Slice{sb64.data(), sb64.size()});
+        BEAST_EXPECT(back64.has_value() && back64->verify(cm));
+    }
+
+    // Non-power-of-two width (padded internally) still round-trips and verifies.
+    {
+        std::uint8_t const w = 32;
+        Scalar const r = Scalar::random();
+        auto const [p, c] = RangeProof::prove(0xdeadbeef, r, w);
+        BEAST_EXPECT(p.verify(c));
+        auto const blob = p.serialize();
+        auto const back = RangeProof::deserialize(Slice{blob.data(), blob.size()});
+        BEAST_EXPECT(back.has_value() && back->verify(c));
+    }
+
+    // Soundness: padding positions must contribute nothing to the represented
+    // value. A proof generated at width 64 for a value with bit 63 set is
+    // honest at width 64, but relabelling it as a 63-bit proof (which also pads
+    // to 64) must NOT verify -- otherwise a malicious 63-bit balance proof
+    // could commit to value + 2^63 and defeat the post-debit non-negativity
+    // bound that relies on width 63.
+    {
+        Scalar const r = Scalar::random();
+        std::uint64_t const v = (std::uint64_t{1} << 63) | 0x1234u;  // >= 2^63
+        auto const [p64, c64] = RangeProof::prove(v, r, 64);
+        BEAST_EXPECT(p64.verify(c64));  // honest at width 64
+
+        // Forge by relabelling as a 63-bit proof. padTo(63) == padTo(64) == 64,
+        // so the serialized length is identical and the blob deserializes.
+        auto blob = p64.serialize();
+        BEAST_EXPECT(blob.size() == RangeProof::serializedSize(63));
+        blob[0] = 63;  // leading bit-width byte
+        auto const forged = RangeProof::deserialize(Slice{blob.data(), blob.size()});
+        BEAST_EXPECT(forged.has_value() && forged->bits() == 63);
+        // Must reject: padded top bit no longer contributes to the value.
+        BEAST_EXPECT(forged.has_value() && !forged->verify(c64));
+    }
+
+    // Honest proof at a padded (non-power-of-two) width 63 still verifies, so
+    // the soundness fix does not break valid proofs at that width.
+    {
+        Scalar const r = Scalar::random();
+        std::uint64_t const v = (std::uint64_t{1} << 62) + 7;  // < 2^63
+        auto const [p, c] = RangeProof::prove(v, r, 63);
+        BEAST_EXPECT(p.verify(c));
+        auto const blob = p.serialize();
+        auto const back = RangeProof::deserialize(Slice{blob.data(), blob.size()});
+        BEAST_EXPECT(back.has_value() && back->verify(c));
     }
 }
 

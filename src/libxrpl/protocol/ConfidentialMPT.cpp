@@ -23,13 +23,6 @@ lit(char const (&s)[N])
     return Slice{reinterpret_cast<std::uint8_t const*>(s), N - 1};
 }
 
-// 2^i as a scalar (i < 64).
-Scalar
-pow2(unsigned i)
-{
-    return Scalar(std::uint64_t{1} << i);
-}
-
 std::string
 key(ECPoint const& p)
 {
@@ -275,8 +268,124 @@ SchnorrProof::deserialize(Slice const& in)
 }
 
 //------------------------------------------------------------------------------
-// RangeProof (bit-decomposition Schnorr-OR range proof)
+// RangeProof (aggregated Bulletproof with inner-product argument)
 //------------------------------------------------------------------------------
+
+namespace {
+
+// Domain separator for every Fiat-Shamir challenge in the range proof.
+inline Slice
+rpDomain()
+{
+    return lit("XLS96-MPT/range/bp/v1");
+}
+
+// Number of inner-product recursion rounds needed to fold n elements:
+// ceil(log2(n)). n is always a power of two here (bits in {1..64} rounded up).
+std::size_t
+log2ceil(std::size_t n)
+{
+    std::size_t k = 0;
+    std::size_t p = 1;
+    while (p < n)
+    {
+        p <<= 1;
+        ++k;
+    }
+    return k;
+}
+
+// Round bits up to the next power of two (1,2,4,...,64). bits in [1, 64].
+std::size_t
+padTo(std::uint8_t bits)
+{
+    std::size_t p = 1;
+    while (p < bits)
+        p <<= 1;
+    return p;
+}
+
+// Nothing-up-my-sleeve generator vectors G_i, H_i and the inner-product base
+// point U, all derived deterministically from the bit width via hashToPoint.
+struct Gens
+{
+    std::vector<ECPoint> g;
+    std::vector<ECPoint> h;
+    ECPoint u;
+};
+
+Gens
+makeGens(std::size_t n)
+{
+    Gens out;
+    out.g.reserve(n);
+    out.h.reserve(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        std::array<std::uint8_t, 9> d{};
+        d[0] = 'G';
+        for (int j = 0; j < 8; ++j)
+            d[1 + j] = static_cast<std::uint8_t>((i >> (8 * j)) & 0xff);
+        out.g.push_back(hashToPoint(rpDomain(), Slice{d.data(), d.size()}));
+        d[0] = 'H';
+        out.h.push_back(hashToPoint(rpDomain(), Slice{d.data(), d.size()}));
+    }
+    char const u[] = "U";
+    out.u = hashToPoint(
+        rpDomain(), Slice{reinterpret_cast<std::uint8_t const*>(u), 1});
+    return out;
+}
+
+// Multi-scalar multiplication sum_i s_i * P_i.
+ECPoint
+msm(std::vector<Scalar> const& s, std::vector<ECPoint> const& p)
+{
+    ECPoint acc = ECPoint::infinity();
+    for (std::size_t i = 0; i < s.size(); ++i)
+        acc = acc + ECPoint::mul(s[i], p[i]);
+    return acc;
+}
+
+// Inner product <a, b> = sum_i a_i b_i.
+Scalar
+inner(std::vector<Scalar> const& a, std::vector<Scalar> const& b)
+{
+    Scalar acc;
+    for (std::size_t i = 0; i < a.size(); ++i)
+        acc = acc + a[i] * b[i];
+    return acc;
+}
+
+// Append a point's compressed bytes to a Fiat-Shamir transcript buffer.
+void
+absorb(std::vector<std::uint8_t>& t, ECPoint const& p)
+{
+    auto const b = p.serialize();
+    t.insert(t.end(), b.begin(), b.end());
+}
+
+// Append a scalar's bytes to a Fiat-Shamir transcript buffer.
+void
+absorb(std::vector<std::uint8_t>& t, Scalar const& s)
+{
+    t.insert(t.end(), s.bytes().begin(), s.bytes().end());
+}
+
+}  // namespace
+
+std::size_t
+RangeProof::rounds(std::uint8_t bits)
+{
+    return log2ceil(padTo(bits));
+}
+
+std::size_t
+RangeProof::serializedSize(std::uint8_t bits)
+{
+    // 1 width byte + A,S,T1,T2 + tauX,mu,tHat + 2k IPA points + a,b.
+    return 1 + 4 * kPointSize + 3 * kScalarSize +
+        2 * rounds(bits) * kPointSize + 2 * kScalarSize;
+}
 
 std::pair<RangeProof, PedersenCommitment>
 RangeProof::prove(std::uint64_t value, Scalar const& blind, std::uint8_t bits)
@@ -287,138 +396,356 @@ RangeProof::prove(std::uint64_t value, Scalar const& blind, std::uint8_t bits)
     PedersenCommitment const commitment =
         PedersenCommitment::commit(value, blind);
 
-    ECPoint const G = ECPoint::base();
+    std::size_t const n = padTo(bits);
+    Gens const gen = makeGens(n);
     ECPoint const H = ECPoint::generatorH();
 
-    // Per-bit blindings r_i chosen so that sum_i 2^i r_i == blind, which makes
-    // sum_i 2^i C_i == commitment.
-    std::vector<Scalar> r(bits);
-    Scalar acc;  // sum_{i<last} 2^i r_i
-    for (std::uint8_t i = 0; i + 1 < bits; ++i)
+    Scalar const one(std::uint64_t{1});
+
+    // aL = bit vector of `value` (positions >= bits are zero, since
+    // value < 2^bits is the statement being proven); aR = aL - 1.
+    std::vector<Scalar> aL(n);
+    std::vector<Scalar> aR(n);
+    for (std::size_t i = 0; i < n; ++i)
     {
-        r[i] = Scalar::random();
-        acc = acc + pow2(i) * r[i];
+        std::uint64_t const bit = (i < bits) ? ((value >> i) & 1u) : 0u;
+        aL[i] = Scalar(bit);
+        aR[i] = aL[i] - one;
     }
-    auto const invLast = pow2(bits - 1).invert();
-    if (!invLast)
-        Throw<std::runtime_error>("RangeProof::prove: non-invertible weight");
-    r[bits - 1] = (blind - acc) * *invLast;
+
+    // A = <aL, G> + <aR, H> + alpha*H_base ; S = <sL, G> + <sR, H> + rho*H_base.
+    std::vector<Scalar> sL(n);
+    std::vector<Scalar> sR(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        sL[i] = Scalar::random();
+        sR[i] = Scalar::random();
+    }
+    Scalar const alpha = Scalar::random();
+    Scalar const rho = Scalar::random();
 
     RangeProof proof;
     proof.bits_ = bits;
-    proof.bitProofs_.reserve(bits);
+    proof.a_ = msm(aL, gen.g) + msm(aR, gen.h) + ECPoint::mul(alpha, H);
+    proof.s_ = msm(sL, gen.g) + msm(sR, gen.h) + ECPoint::mul(rho, H);
 
-    auto const cb = commitment.serialize();
-    Slice const cSlice{cb.data(), cb.size()};
+    // Transcript: commitment || A || S  ->  challenges y, z.
+    std::vector<std::uint8_t> t;
+    absorb(t, commitment.point());
+    absorb(t, proof.a_);
+    absorb(t, proof.s_);
+    Slice const tSlice0{t.data(), t.size()};
+    Scalar const y = hashToScalar(rpDomain(), {tSlice0, lit("y")});
+    Scalar const z = hashToScalar(rpDomain(), {tSlice0, lit("z")});
 
-    for (std::uint8_t i = 0; i < bits; ++i)
+    // Powers y^i (full padded width) and 2^i. The 2^i weights are only set for
+    // positions i < bits; padding positions [bits, n) stay zero (default
+    // Scalar), so they contribute nothing to the represented value and the
+    // proof is bounded by 2^bits rather than 2^n. z2 = z^2.
+    std::vector<Scalar> yPow(n);
+    std::vector<Scalar> twoPow(n);
+    yPow[0] = one;
+    for (std::size_t i = 1; i < n; ++i)
+        yPow[i] = yPow[i - 1] * y;
+    Scalar const two(std::uint64_t{2});
+    twoPow[0] = one;
+    for (std::size_t i = 1; i < bits; ++i)
+        twoPow[i] = twoPow[i - 1] * two;
+    Scalar const z2 = z * z;
+
+    // l(X) = (aL - z*1) + sL*X ; r(X) = y^n o (aR + z*1 + sR*X) + z^2 2^n.
+    std::vector<Scalar> l0(n), l1(n), r0(n), r1(n);
+    for (std::size_t i = 0; i < n; ++i)
     {
-        unsigned const b = (value >> i) & 1u;
-        ECPoint const Ci =
-            PedersenCommitment::commit(std::uint64_t{b}, r[i]).point();
-
-        // Branch statements: P0 = Ci (== r_i*H), P1 = Ci - G (== r_i*H).
-        std::array<ECPoint, 2> const P = {Ci, Ci - G};
-
-        // Simulate the fake branch f = 1 - b.
-        unsigned const f = 1u - b;
-        Scalar const cFake = Scalar::random();
-        Scalar const zFake = Scalar::random();
-        ECPoint const aFake = ECPoint::mul(zFake, H) - ECPoint::mul(cFake, P[f]);
-
-        // Honest commitment for the real branch.
-        Scalar const w = Scalar::random();
-        ECPoint const aReal = ECPoint::mul(w, H);
-
-        std::array<ECPoint, 2> A;
-        A[b] = aReal;
-        A[f] = aFake;
-
-        std::uint8_t const idx = i;
-        auto const a0 = A[0].serialize();
-        auto const a1 = A[1].serialize();
-        auto const cib = Ci.serialize();
-        Scalar const e = hashToScalar(
-            lit("XLS96-MPT/range/v1"),
-            {cSlice,
-             Slice{&idx, 1},
-             Slice{cib.data(), cib.size()},
-             Slice{a0.data(), a0.size()},
-             Slice{a1.data(), a1.size()}});
-
-        Scalar const cReal = e - cFake;
-        Scalar const zReal = w + cReal * r[i];
-
-        std::array<Scalar, 2> c;
-        std::array<Scalar, 2> z;
-        c[b] = cReal;
-        c[f] = cFake;
-        z[b] = zReal;
-        z[f] = zFake;
-
-        proof.bitProofs_.push_back(BitProof{Ci, c[0], c[1], z[0], z[1]});
+        l0[i] = aL[i] - z;
+        l1[i] = sL[i];
+        r0[i] = yPow[i] * (aR[i] + z) + z2 * twoPow[i];
+        r1[i] = yPow[i] * sR[i];
     }
 
+    // t(X) = <l,r> = t0 + t1 X + t2 X^2.
+    Scalar const t1c = inner(l0, r1) + inner(l1, r0);
+    Scalar const t2c = inner(l1, r1);
+
+    Scalar const tau1 = Scalar::random();
+    Scalar const tau2 = Scalar::random();
+    proof.t1_ = PedersenCommitment::commit(t1c, tau1).point();
+    proof.t2_ = PedersenCommitment::commit(t2c, tau2).point();
+
+    // Transcript: || T1 || T2  ->  challenge x.
+    absorb(t, proof.t1_);
+    absorb(t, proof.t2_);
+    Slice const tSlice1{t.data(), t.size()};
+    Scalar const x = hashToScalar(rpDomain(), {tSlice1, lit("x")});
+
+    // Evaluate l, r, tHat at x and the blinding openings.
+    std::vector<Scalar> lv(n), rv(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        lv[i] = l0[i] + l1[i] * x;
+        rv[i] = r0[i] + r1[i] * x;
+    }
+    proof.tHat_ = inner(lv, rv);
+    proof.tauX_ = z2 * blind + tau1 * x + tau2 * (x * x);
+    proof.mu_ = alpha + rho * x;
+
+    // Inner-product argument on (lv, rv) over generators (g, h') where
+    // h'_i = (y^{-i}) o h_i, with base point U weighted by challenge w.
+    auto const yInv = y.invert();
+    if (!yInv)
+        Throw<std::runtime_error>("RangeProof::prove: non-invertible y");
+    std::vector<ECPoint> gv = gen.g;
+    std::vector<ECPoint> hv(n);
+    Scalar yInvPow = one;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        hv[i] = ECPoint::mul(yInvPow, gen.h[i]);
+        yInvPow = yInvPow * *yInv;
+    }
+
+    // Bind U into the transcript via w = H(transcript || tHat).
+    absorb(t, proof.tHat_);
+    Slice const tSlice2{t.data(), t.size()};
+    Scalar const w = hashToScalar(rpDomain(), {tSlice2, lit("w")});
+    ECPoint const U = ECPoint::mul(w, gen.u);
+
+    std::vector<Scalar> a = lv;
+    std::vector<Scalar> b = rv;
+    std::vector<std::uint8_t> tip = t;  // running IPA transcript
+
+    std::size_t m = n;
+    while (m > 1)
+    {
+        std::size_t const half = m / 2;
+        std::vector<Scalar> aLo(a.begin(), a.begin() + half);
+        std::vector<Scalar> aHi(a.begin() + half, a.begin() + m);
+        std::vector<Scalar> bLo(b.begin(), b.begin() + half);
+        std::vector<Scalar> bHi(b.begin() + half, b.begin() + m);
+        std::vector<ECPoint> gLo(gv.begin(), gv.begin() + half);
+        std::vector<ECPoint> gHi(gv.begin() + half, gv.begin() + m);
+        std::vector<ECPoint> hLo(hv.begin(), hv.begin() + half);
+        std::vector<ECPoint> hHi(hv.begin() + half, hv.begin() + m);
+
+        Scalar const cL = inner(aLo, bHi);
+        Scalar const cR = inner(aHi, bLo);
+        ECPoint const L =
+            msm(aLo, gHi) + msm(bHi, hLo) + ECPoint::mul(cL, U);
+        ECPoint const R =
+            msm(aHi, gLo) + msm(bLo, hHi) + ECPoint::mul(cR, U);
+        proof.ipL_.push_back(L);
+        proof.ipR_.push_back(R);
+
+        absorb(tip, L);
+        absorb(tip, R);
+        Scalar const u = hashToScalar(
+            rpDomain(), {Slice{tip.data(), tip.size()}, lit("u")});
+        auto const uInv = u.invert();
+        if (!uInv)
+            Throw<std::runtime_error>("RangeProof::prove: non-invertible u");
+
+        std::vector<Scalar> aNew(half), bNew(half);
+        std::vector<ECPoint> gNew(half), hNew(half);
+        for (std::size_t i = 0; i < half; ++i)
+        {
+            aNew[i] = aLo[i] * u + aHi[i] * *uInv;
+            bNew[i] = bLo[i] * *uInv + bHi[i] * u;
+            gNew[i] = ECPoint::mul(*uInv, gLo[i]) + ECPoint::mul(u, gHi[i]);
+            hNew[i] = ECPoint::mul(u, hLo[i]) + ECPoint::mul(*uInv, hHi[i]);
+        }
+        a = std::move(aNew);
+        b = std::move(bNew);
+        gv = std::move(gNew);
+        hv = std::move(hNew);
+        m = half;
+    }
+
+    proof.ipa_ = a[0];
+    proof.ipb_ = b[0];
     return {proof, commitment};
 }
 
 bool
 RangeProof::verify(PedersenCommitment const& commitment) const
 {
-    if (bits_ == 0 || bits_ > kMaxBits || bitProofs_.size() != bits_)
+    if (bits_ == 0 || bits_ > kMaxBits)
+        return false;
+    std::size_t const n = padTo(bits_);
+    if (ipL_.size() != rounds(bits_) || ipR_.size() != ipL_.size())
         return false;
 
-    ECPoint const G = ECPoint::base();
+    Gens const gen = makeGens(n);
     ECPoint const H = ECPoint::generatorH();
+    Scalar const one(std::uint64_t{1});
 
-    auto const cb = commitment.serialize();
-    Slice const cSlice{cb.data(), cb.size()};
+    // Recompute challenges y, z, x, w from the transcript.
+    std::vector<std::uint8_t> t;
+    absorb(t, commitment.point());
+    absorb(t, a_);
+    absorb(t, s_);
+    Slice const tSlice0{t.data(), t.size()};
+    Scalar const y = hashToScalar(rpDomain(), {tSlice0, lit("y")});
+    Scalar const z = hashToScalar(rpDomain(), {tSlice0, lit("z")});
 
-    ECPoint aggregate = ECPoint::infinity();
-    for (std::uint8_t i = 0; i < bits_; ++i)
+    absorb(t, t1_);
+    absorb(t, t2_);
+    Slice const tSlice1{t.data(), t.size()};
+    Scalar const x = hashToScalar(rpDomain(), {tSlice1, lit("x")});
+
+    // Mirror the prover: 2^i weights only for positions i < bits_; padding
+    // positions [bits_, n) stay zero so they contribute nothing to the
+    // represented value (bounds the proof by 2^bits_, not 2^n).
+    std::vector<Scalar> yPow(n);
+    std::vector<Scalar> twoPow(n);
+    yPow[0] = one;
+    for (std::size_t i = 1; i < n; ++i)
+        yPow[i] = yPow[i - 1] * y;
+    Scalar const two(std::uint64_t{2});
+    twoPow[0] = one;
+    for (std::size_t i = 1; i < bits_; ++i)
+        twoPow[i] = twoPow[i - 1] * two;
+    Scalar const z2 = z * z;
+    Scalar const z3 = z2 * z;
+
+    // sum_i y^i and sum_i 2^i.
+    Scalar sumY;
+    Scalar sumTwo;
+    for (std::size_t i = 0; i < n; ++i)
     {
-        BitProof const& bp = bitProofs_[i];
-        std::array<ECPoint, 2> const P = {bp.commitment, bp.commitment - G};
-
-        // A_j = z_j*H - c_j*P_j
-        std::array<ECPoint, 2> const A = {
-            ECPoint::mul(bp.z0, H) - ECPoint::mul(bp.c0, P[0]),
-            ECPoint::mul(bp.z1, H) - ECPoint::mul(bp.c1, P[1])};
-
-        std::uint8_t const idx = i;
-        auto const a0 = A[0].serialize();
-        auto const a1 = A[1].serialize();
-        auto const cib = bp.commitment.serialize();
-        Scalar const e = hashToScalar(
-            lit("XLS96-MPT/range/v1"),
-            {cSlice,
-             Slice{&idx, 1},
-             Slice{cib.data(), cib.size()},
-             Slice{a0.data(), a0.size()},
-             Slice{a1.data(), a1.size()}});
-
-        if (e != (bp.c0 + bp.c1))
-            return false;
-
-        aggregate = aggregate + ECPoint::mul(pow2(i), bp.commitment);
+        sumY = sumY + yPow[i];
+        sumTwo = sumTwo + twoPow[i];
     }
 
-    return aggregate == commitment.point();
+    // delta(y,z) = (z - z^2) * sum y^i - z^3 * sum 2^i.
+    Scalar const delta = (z - z2) * sumY - z3 * sumTwo;
+
+    // Check t-poly opening: tHat*G + tauX*H == V*z^2 + delta*G + x*T1 + x^2*T2.
+    ECPoint const lhsT =
+        ECPoint::mulBase(tHat_) + ECPoint::mul(tauX_, H);
+    ECPoint const rhsT = ECPoint::mul(z2, commitment.point()) +
+        ECPoint::mulBase(delta) + ECPoint::mul(x, t1_) +
+        ECPoint::mul(x * x, t2_);
+    if (lhsT != rhsT)
+        return false;
+
+    // Rebuild h'_i = y^{-i} o h_i.
+    auto const yInv = y.invert();
+    if (!yInv)
+        return false;
+    std::vector<ECPoint> gv = gen.g;
+    std::vector<ECPoint> hv(n);
+    Scalar yInvPow = one;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        hv[i] = ECPoint::mul(yInvPow, gen.h[i]);
+        yInvPow = yInvPow * *yInv;
+    }
+
+    // w binds U; P0 is the IPA commitment to (l, r) with the value tHat folded
+    // into U: P0 = A + x*S - mu*H_base + <(z)*1, g_offset> + ... reconstructed
+    // directly from the round equation below.
+    absorb(t, tHat_);
+    Slice const tSlice2{t.data(), t.size()};
+    Scalar const w = hashToScalar(rpDomain(), {tSlice2, lit("w")});
+    ECPoint const U = ECPoint::mul(w, gen.u);
+
+    // P = A + x*S - mu*H + sum_i [ z*g_i ] + sum_i [ (z*y^i + z^2 2^i) * h'_i ]
+    //     + tHat*U  (the committed inner product).
+    std::vector<Scalar> gExp(n);
+    std::vector<Scalar> hExp(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        gExp[i] = z.negate();
+        hExp[i] = z * yPow[i] + z2 * twoPow[i];
+    }
+    ECPoint P = a_ + ECPoint::mul(x, s_) + ECPoint::mul(mu_.negate(), H) +
+        msm(gExp, gv) + msm(hExp, hv) + ECPoint::mul(tHat_, U);
+
+    // Replay the IPA rounds, folding generators and P with each challenge u.
+    std::vector<std::uint8_t> tip = t;
+    std::vector<Scalar> uChal(ipL_.size());
+    std::vector<Scalar> uInvChal(ipL_.size());
+    for (std::size_t r = 0; r < ipL_.size(); ++r)
+    {
+        absorb(tip, ipL_[r]);
+        absorb(tip, ipR_[r]);
+        Scalar const u = hashToScalar(
+            rpDomain(), {Slice{tip.data(), tip.size()}, lit("u")});
+        auto const uInv = u.invert();
+        if (!uInv)
+            return false;
+        uChal[r] = u;
+        uInvChal[r] = *uInv;
+    }
+
+    // Fold generators down to a single g* and h* using the standard product of
+    // challenges. s_i = prod_j u_j^{ +1 if bit set else -1 }.
+    std::size_t const k = ipL_.size();
+    std::vector<Scalar> sVec(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        Scalar prod = one;
+        for (std::size_t j = 0; j < k; ++j)
+        {
+            // Round j (from first) folds with stride; the high half (bit set)
+            // uses u, the low half uses u^{-1}. Bit ordering matches the
+            // prover's split: most-significant round is j = 0.
+            std::size_t const bitMask = std::size_t{1} << (k - 1 - j);
+            bool const hi = (i & bitMask) != 0;
+            prod = prod * (hi ? uChal[j] : uInvChal[j]);
+        }
+        sVec[i] = prod;
+    }
+
+    ECPoint gStar = ECPoint::infinity();
+    ECPoint hStar = ECPoint::infinity();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        gStar = gStar + ECPoint::mul(sVec[i], gv[i]);
+        // h folds with the inverse pattern of g.
+        Scalar const sInv = sVec[i].invert().value_or(Scalar());
+        hStar = hStar + ECPoint::mul(sInv, hv[i]);
+    }
+
+    // Fold P with L_j, R_j: P' = P + sum_j (u_j^2 L_j + u_j^{-2} R_j).
+    ECPoint Pfold = P;
+    for (std::size_t r = 0; r < k; ++r)
+    {
+        Scalar const u2 = uChal[r] * uChal[r];
+        Scalar const u2Inv = uInvChal[r] * uInvChal[r];
+        Pfold = Pfold + ECPoint::mul(u2, ipL_[r]) + ECPoint::mul(u2Inv, ipR_[r]);
+    }
+
+    // Final check: P' == a*g* + b*h* + (a*b)*U.
+    ECPoint const rhs = ECPoint::mul(ipa_, gStar) +
+        ECPoint::mul(ipb_, hStar) + ECPoint::mul(ipa_ * ipb_, U);
+    return Pfold == rhs;
 }
 
 std::vector<std::uint8_t>
 RangeProof::serialize() const
 {
     std::vector<std::uint8_t> out;
-    out.reserve(1 + bitProofs_.size() * (kPointSize + 4 * kScalarSize));
+    out.reserve(serializedSize(bits_));
     out.push_back(bits_);
-    for (auto const& bp : bitProofs_)
+    for (ECPoint const* p : {&a_, &s_, &t1_, &t2_})
     {
-        auto const c = bp.commitment.serialize();
-        out.insert(out.end(), c.begin(), c.end());
-        for (Scalar const* s : {&bp.c0, &bp.c1, &bp.z0, &bp.z1})
-            out.insert(out.end(), s->bytes().begin(), s->bytes().end());
+        auto const b = p->serialize();
+        out.insert(out.end(), b.begin(), b.end());
     }
+    for (Scalar const* s : {&tauX_, &mu_, &tHat_})
+        out.insert(out.end(), s->bytes().begin(), s->bytes().end());
+    for (auto const& L : ipL_)
+    {
+        auto const b = L.serialize();
+        out.insert(out.end(), b.begin(), b.end());
+    }
+    for (auto const& R : ipR_)
+    {
+        auto const b = R.serialize();
+        out.insert(out.end(), b.begin(), b.end());
+    }
+    out.insert(out.end(), ipa_.bytes().begin(), ipa_.bytes().end());
+    out.insert(out.end(), ipb_.bytes().begin(), ipb_.bytes().end());
     return out;
 }
 
@@ -430,30 +757,44 @@ RangeProof::deserialize(Slice const& in)
     std::uint8_t const bits = in.data()[0];
     if (bits == 0 || bits > kMaxBits)
         return std::nullopt;
-    std::size_t const recSize = kPointSize + 4 * kScalarSize;
-    if (in.size() != 1 + std::size_t{bits} * recSize)
+    if (in.size() != serializedSize(bits))
         return std::nullopt;
 
     RangeProof proof;
     proof.bits_ = bits;
-    proof.bitProofs_.reserve(bits);
     std::size_t off = 1;
-    for (std::uint8_t i = 0; i < bits; ++i)
-    {
-        auto const c = ECPoint::deserialize(Slice{in.data() + off, kPointSize});
-        if (!c)
-            return std::nullopt;
+
+    auto readPoint = [&](ECPoint& dst) -> bool {
+        auto const p = ECPoint::deserialize(Slice{in.data() + off, kPointSize});
+        if (!p)
+            return false;
+        dst = *p;
         off += kPointSize;
-        Scalar const c0{Slice{in.data() + off, kScalarSize}};
+        return true;
+    };
+    auto readScalar = [&](Scalar& dst) {
+        dst = Scalar{Slice{in.data() + off, kScalarSize}};
         off += kScalarSize;
-        Scalar const c1{Slice{in.data() + off, kScalarSize}};
-        off += kScalarSize;
-        Scalar const z0{Slice{in.data() + off, kScalarSize}};
-        off += kScalarSize;
-        Scalar const z1{Slice{in.data() + off, kScalarSize}};
-        off += kScalarSize;
-        proof.bitProofs_.push_back(BitProof{*c, c0, c1, z0, z1});
-    }
+    };
+
+    if (!readPoint(proof.a_) || !readPoint(proof.s_) ||
+        !readPoint(proof.t1_) || !readPoint(proof.t2_))
+        return std::nullopt;
+    readScalar(proof.tauX_);
+    readScalar(proof.mu_);
+    readScalar(proof.tHat_);
+
+    std::size_t const k = rounds(bits);
+    proof.ipL_.resize(k);
+    proof.ipR_.resize(k);
+    for (std::size_t i = 0; i < k; ++i)
+        if (!readPoint(proof.ipL_[i]))
+            return std::nullopt;
+    for (std::size_t i = 0; i < k; ++i)
+        if (!readPoint(proof.ipR_[i]))
+            return std::nullopt;
+    readScalar(proof.ipa_);
+    readScalar(proof.ipb_);
     return proof;
 }
 

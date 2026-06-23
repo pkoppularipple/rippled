@@ -438,17 +438,19 @@ RangeProof::prove(std::uint64_t value, Scalar const& blind, std::uint8_t bits)
     Scalar const y = hashToScalar(rpDomain(), {tSlice0, lit("y")});
     Scalar const z = hashToScalar(rpDomain(), {tSlice0, lit("z")});
 
-    // Powers y^i and 2^i; z2 = z^2.
+    // Powers y^i (full padded width) and 2^i. The 2^i weights are only set for
+    // positions i < bits; padding positions [bits, n) stay zero (default
+    // Scalar), so they contribute nothing to the represented value and the
+    // proof is bounded by 2^bits rather than 2^n. z2 = z^2.
     std::vector<Scalar> yPow(n);
     std::vector<Scalar> twoPow(n);
     yPow[0] = one;
-    twoPow[0] = one;
-    Scalar const two(std::uint64_t{2});
     for (std::size_t i = 1; i < n; ++i)
-    {
         yPow[i] = yPow[i - 1] * y;
+    Scalar const two(std::uint64_t{2});
+    twoPow[0] = one;
+    for (std::size_t i = 1; i < bits; ++i)
         twoPow[i] = twoPow[i - 1] * two;
-    }
     Scalar const z2 = z * z;
 
     // l(X) = (aL - z*1) + sL*X ; r(X) = y^n o (aR + z*1 + sR*X) + z^2 2^n.
@@ -589,16 +591,18 @@ RangeProof::verify(PedersenCommitment const& commitment) const
     Slice const tSlice1{t.data(), t.size()};
     Scalar const x = hashToScalar(rpDomain(), {tSlice1, lit("x")});
 
+    // Mirror the prover: 2^i weights only for positions i < bits_; padding
+    // positions [bits_, n) stay zero so they contribute nothing to the
+    // represented value (bounds the proof by 2^bits_, not 2^n).
     std::vector<Scalar> yPow(n);
     std::vector<Scalar> twoPow(n);
     yPow[0] = one;
-    twoPow[0] = one;
-    Scalar const two(std::uint64_t{2});
     for (std::size_t i = 1; i < n; ++i)
-    {
         yPow[i] = yPow[i - 1] * y;
+    Scalar const two(std::uint64_t{2});
+    twoPow[0] = one;
+    for (std::size_t i = 1; i < bits_; ++i)
         twoPow[i] = twoPow[i - 1] * two;
-    }
     Scalar const z2 = z * z;
     Scalar const z3 = z2 * z;
 

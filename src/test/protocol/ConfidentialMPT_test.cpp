@@ -356,6 +356,41 @@ ConfidentialMPT_test::testRangeProof()
         auto const back = RangeProof::deserialize(Slice{blob.data(), blob.size()});
         BEAST_EXPECT(back.has_value() && back->verify(c));
     }
+
+    // Soundness: padding positions must contribute nothing to the represented
+    // value. A proof generated at width 64 for a value with bit 63 set is
+    // honest at width 64, but relabelling it as a 63-bit proof (which also pads
+    // to 64) must NOT verify -- otherwise a malicious 63-bit balance proof
+    // could commit to value + 2^63 and defeat the post-debit non-negativity
+    // bound that relies on width 63.
+    {
+        Scalar const r = Scalar::random();
+        std::uint64_t const v = (std::uint64_t{1} << 63) | 0x1234u;  // >= 2^63
+        auto const [p64, c64] = RangeProof::prove(v, r, 64);
+        BEAST_EXPECT(p64.verify(c64));  // honest at width 64
+
+        // Forge by relabelling as a 63-bit proof. padTo(63) == padTo(64) == 64,
+        // so the serialized length is identical and the blob deserializes.
+        auto blob = p64.serialize();
+        BEAST_EXPECT(blob.size() == RangeProof::serializedSize(63));
+        blob[0] = 63;  // leading bit-width byte
+        auto const forged = RangeProof::deserialize(Slice{blob.data(), blob.size()});
+        BEAST_EXPECT(forged.has_value() && forged->bits() == 63);
+        // Must reject: padded top bit no longer contributes to the value.
+        BEAST_EXPECT(forged.has_value() && !forged->verify(c64));
+    }
+
+    // Honest proof at a padded (non-power-of-two) width 63 still verifies, so
+    // the soundness fix does not break valid proofs at that width.
+    {
+        Scalar const r = Scalar::random();
+        std::uint64_t const v = (std::uint64_t{1} << 62) + 7;  // < 2^63
+        auto const [p, c] = RangeProof::prove(v, r, 63);
+        BEAST_EXPECT(p.verify(c));
+        auto const blob = p.serialize();
+        auto const back = RangeProof::deserialize(Slice{blob.data(), blob.size()});
+        BEAST_EXPECT(back.has_value() && back->verify(c));
+    }
 }
 
 void

@@ -39,10 +39,10 @@ validPoint(std::optional<Slice> const& s)
 
 // Layout of the ZKProof bundle carried by ConfidentialMPTConvertBack: a linkage
 // proof binding sfBalanceCommitment to the post-debit spending balance (balance
-// ownership and key linkage) followed by a range proof proving the remaining
-// balance is non-negative. This is the same self-contained linear encoding the
-// send path uses for its balance half; the succinct compact-sigma /
-// single-Bulletproof encoding is deferred to a later slice.
+// ownership and key linkage) followed by a logarithmic aggregated-Bulletproof
+// range proof proving the remaining balance is non-negative. This is the same
+// encoding the send path uses for its balance half; the range proof is
+// self-describing via its leading bit-width byte.
 struct ConvertBackProofs
 {
     cmpt::LinkageProof linkBalance;
@@ -65,8 +65,7 @@ parseConvertBackProofs(Slice const& in)
     std::uint8_t const bits = in.data()[link];
     if (bits == 0 || bits > cmpt::RangeProof::kMaxBits)
         return std::nullopt;
-    constexpr std::size_t rec = cmpt::kPointSize + 4 * cmpt::kScalarSize;
-    if (rem != 1 + std::size_t{bits} * rec)
+    if (rem != cmpt::RangeProof::serializedSize(bits))
         return std::nullopt;
     auto const rb = cmpt::RangeProof::deserialize(Slice{in.data() + link, rem});
     if (!rb)

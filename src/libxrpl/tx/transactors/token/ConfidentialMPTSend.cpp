@@ -36,9 +36,11 @@ validPoint(std::optional<Slice> const& s)
         cmpt::ECPoint::deserialize(*s).has_value();
 }
 
-// Layout of the ZKProof bundle carried by ConfidentialMPTSend. This is a
-// self-contained linear encoding for this slice; the succinct compact-sigma /
-// aggregated-Bulletproof encoding is deferred.
+// Layout of the ZKProof bundle carried by ConfidentialMPTSend: the
+// plaintext-equality and linkage sigma proofs followed by two logarithmic
+// aggregated-Bulletproof range proofs (one for the transferred amount, one for
+// the remaining spending balance). Each range proof is self-describing via its
+// leading bit-width byte.
 struct SendProofs
 {
     cmpt::PlaintextEqualityProof peqDest;
@@ -91,12 +93,11 @@ parseSendProofs(Slice const& in, bool hasAuditor)
     p.linkBalance = *lb;
 
     // The two range proofs are self-describing: byte 0 is the bit width.
-    constexpr std::size_t rec = cmpt::kPointSize + 4 * cmpt::kScalarSize;
     std::size_t const rem = in.size() - off;
     std::uint8_t const bitsA = in.data()[off];
     if (bitsA == 0 || bitsA > cmpt::RangeProof::kMaxBits)
         return std::nullopt;
-    std::size_t const lenA = 1 + std::size_t{bitsA} * rec;
+    std::size_t const lenA = cmpt::RangeProof::serializedSize(bitsA);
     if (rem <= lenA)
         return std::nullopt;
     auto ra = cmpt::RangeProof::deserialize(sub(off, lenA));

@@ -17,13 +17,16 @@ namespace cmpt {
       - Pedersen commitments (additively homomorphic, perfectly hiding).
       - Exponential EC-ElGamal encryption (additively homomorphic).
       - Schnorr proof of knowledge of an encryption secret key.
-      - A bit-decomposition zero-knowledge range proof.
+      - An aggregated Bulletproofs zero-knowledge range proof.
 
     Wire-format note: this slice fixes the in-memory algebra and a natural
-    serialization (33-byte compressed points, 32-byte big-endian scalars). Exact
-    byte-for-byte compatibility with the reference mpt-crypto library and the
-    final Bulletproofs range-proof encoding is reconciled in the send-path
-    slice; the range proof here is a self-contained, verifiable placeholder.
+    serialization (33-byte compressed points, 32-byte big-endian scalars). The
+    range proof is a self-contained, sound Bulletproof (logarithmic proof size).
+    Byte-for-byte compatibility with the reference mpt-crypto library is not yet
+    asserted: that library and its Bulletproofs known-answer vectors are not
+    reachable from this build, so the encoding below is self-consistent only
+    (prove/verify round-trips and soundness) and is reconciled with mpt-crypto
+    when those vectors become available.
 */
 
 /// Serialized size of an EC-ElGamal public key (one compressed point).
@@ -197,13 +200,26 @@ private:
 /** Zero-knowledge proof that a Pedersen commitment opens to a value in
     [0, 2^bits).
 
-    Implemented by committing to each bit and proving, with a Schnorr OR proof,
-    that every bit commitment opens to 0 or 1; the verifier additionally checks
-    that the weighted sum of the bit commitments equals the input commitment.
+    Aggregated Bulletproofs range proof (Bunz et al.). The value's bit vector is
+    committed in A; a blinding polynomial in S; the inner-product relation that
+    ties the bits to the committed value is then collapsed by a logarithmic
+    inner-product argument (the L/R rounds below). Proof size is O(log bits)
+    rather than O(bits): one byte of width, four points (A, S, T1, T2), three
+    scalars (tauX, mu, tHat), then 2*ceil(log2(bits)) points and two scalars for
+    the inner-product argument.
 
-    This is a correct, self-contained range proof. It is deliberately the simple
-    (linear-size) construction; the succinct, aggregated Bulletproofs encoding
-    is deferred to a later slice. Proof size is O(bits).
+    Soundness fixes the value to lie in [0, 2^bits): the proof binds exactly
+    `bits` bit positions, so the post-debit balance width (63) still detects
+    underflow. All challenges come from the domain-separated Fiat-Shamir
+    transcript built on hashToScalar; all generators are nothing-up-my-sleeve
+    points from hashToPoint, so the scheme uses only the ECMath primitives.
+
+    Wire layout (big-endian scalars, SEC1-compressed points):
+        [0]                      bits (1 byte)
+        A, S, T1, T2             4 * kPointSize
+        tauX, mu, tHat           3 * kScalarSize
+        L_0..L_{k-1}, R_0..R_{k-1}   2*k * kPointSize, k = rounds(bits)
+        a, b                     2 * kScalarSize
 */
 class RangeProof
 {
@@ -229,6 +245,14 @@ public:
         return bits_;
     }
 
+    /// Number of inner-product recursion rounds for a given bit width.
+    static std::size_t
+    rounds(std::uint8_t bits);
+
+    /// Exact serialized byte length for a given bit width.
+    static std::size_t
+    serializedSize(std::uint8_t bits);
+
     [[nodiscard]] std::vector<std::uint8_t>
     serialize() const;
 
@@ -236,18 +260,18 @@ public:
     deserialize(Slice const& in);
 
 private:
-    // One Schnorr OR proof per bit, proving the bit commitment opens to 0 or 1.
-    struct BitProof
-    {
-        ECPoint commitment;  // C_i = b_i*G + r_i*H
-        Scalar c0;           // challenge for the "bit == 0" branch
-        Scalar c1;           // challenge for the "bit == 1" branch
-        Scalar z0;           // response for the "bit == 0" branch
-        Scalar z1;           // response for the "bit == 1" branch
-    };
-
     std::uint8_t bits_{0};
-    std::vector<BitProof> bitProofs_;
+    ECPoint a_;   // A: vector commitment to the value's bits
+    ECPoint s_;   // S: vector commitment to the blinding terms
+    ECPoint t1_;  // T1: commitment to the linear coefficient of t(X)
+    ECPoint t2_;  // T2: commitment to the quadratic coefficient of t(X)
+    Scalar tauX_;
+    Scalar mu_;
+    Scalar tHat_;
+    std::vector<ECPoint> ipL_;  // inner-product argument left commitments
+    std::vector<ECPoint> ipR_;  // inner-product argument right commitments
+    Scalar ipa_;                // folded inner-product scalar a
+    Scalar ipb_;                // folded inner-product scalar b
 };
 
 //------------------------------------------------------------------------------

@@ -51,7 +51,7 @@ ConfidentialMPTClawback::preflight(PreflightContext const& ctx)
 
     // The ZKProof carries exactly one linkage proof binding the issuer mirror to
     // the disclosed amount.
-    if (ctx.tx[sfZKProof].size() != cmpt::LinkageProof::kSize)
+    if (ctx.tx[sfZKProof].size() != cmpt::LinkageProof::serializedSize())
         return temMALFORMED;
 
     // The clawed-back amount is the holder's entire confidential balance; it is

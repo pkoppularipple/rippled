@@ -1,4 +1,6 @@
 #include <test/jtx.h>
+#include <test/jtx/credentials.h>
+#include <test/jtx/deposit.h>
 #include <test/jtx/mpt.h>
 
 #include <xrpl/basics/Slice.h>
@@ -533,6 +535,148 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
                 issuerPub, cmpt::ElGamalCiphertext::encryptZero()),
             Ter(temDISABLED));
     }
+}
+
+void
+testDepositAuth(FeatureBitset features)
+{
+    testcase("DepositAuth and Credentials enforcement");
+    using namespace jtx;
+
+    Account const alice("alice");
+    Account const bob("bob");
+    Account const carol("carol");
+    Account const issuer("issuer");
+
+    auto const issuerSk = cmpt::ElGamalSecretKey::random();
+    auto const issuerPub = issuerSk.publicKey();
+    auto const bobSk = cmpt::ElGamalSecretKey::random();
+    auto const bobPub = bobSk.publicKey();
+    auto const carolSk = cmpt::ElGamalSecretKey::random();
+    auto const carolPub = carolSk.publicKey();
+
+    std::string const credType = "abcdefgh";
+
+    auto setup = [&](Env& env) -> MPTID {
+        MPTTester mpt(env, alice, {.holders = {bob, carol}});
+        mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+        auto const id = mpt.issuanceID();
+        env(mpt::setEncryptionKey(alice, id, issuerPub));
+        env.close();
+        mpt.authorize({.account = bob});
+        mpt.authorize({.account = carol});
+        env(mpt::setEncryptionKey(bob, id, bobPub));
+        env(mpt::setEncryptionKey(carol, id, carolPub));
+        env.close();
+        env(convertJV(bob, id, 1000, bobPub, issuerPub, bobSk.x));
+        env.close();
+        return id;
+    };
+
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        env(fset(carol, asfDepositAuth));
+        env.close();
+        auto jv = sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        env(jv, Ter(tecNO_PERMISSION));
+    }
+
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        env(fset(carol, asfDepositAuth));
+        env.close();
+        env(deposit::auth(carol, bob));
+        env.close();
+        auto jv = sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        env(jv);
+        env.close();
+        BEAST_EXPECT(env.balance(carol, id) == 400);
+    }
+
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        env(credentials::create(bob, issuer, credType));
+        env.close();
+        env(credentials::accept(bob, issuer, credType));
+        env.close();
+        auto const jv = credentials::ledgerEntry(env, bob, issuer, credType);
+        std::string const credIdx = jv[jss::result][jss::index].asString();
+        env(fset(carol, asfDepositAuth));
+        env.close();
+        auto jsend = sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        jsend[sfCredentialIDs.jsonName] = json::ValueType::Array;
+        jsend[sfCredentialIDs.jsonName].append(credIdx);
+        env(jsend, Ter(tecNO_PERMISSION));
+    }
+
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        env(credentials::create(bob, issuer, credType));
+        env.close();
+        env(credentials::accept(bob, issuer, credType));
+        env.close();
+        auto const jv = credentials::ledgerEntry(env, bob, issuer, credType);
+        std::string const credIdx = jv[jss::result][jss::index].asString();
+        env(fset(carol, asfDepositAuth));
+        env.close();
+        env(deposit::authCredentials(carol, {{.issuer = issuer, .credType = credType}}));
+        env.close();
+        auto jsend = sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        jsend[sfCredentialIDs.jsonName] = json::ValueType::Array;
+        jsend[sfCredentialIDs.jsonName].append(credIdx);
+        env(jsend);
+        env.close();
+        BEAST_EXPECT(env.balance(carol, id) == 400);
+    }
+
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        env(fset(carol, asfDepositAuth));
+        env.close();
+        env(deposit::authCredentials(carol, {{.issuer = issuer, .credType = credType}}));
+        env.close();
+        auto jsend = sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        jsend[sfCredentialIDs.jsonName] = json::ValueType::Array;
+        jsend[sfCredentialIDs.jsonName].append(
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+        env(jsend, Ter(tecBAD_CREDENTIALS));
+    }
+
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        auto jsend = sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        env(jsend);
+        env.close();
+        BEAST_EXPECT(env.balance(carol, id) == 400);
+    }
+}
+
+void
+run() override
+{
+    using namespace jtx;
+    auto const all = supported_amendments();
+    testConvert(all);
+    testSend(all);
+    testDepositAuth(all);
 }
 
 BEAST_DEFINE_TESTSUITE(ConfidentialMPTSendPath, app, xrpl);

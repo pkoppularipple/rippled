@@ -140,6 +140,7 @@ public:
         testConvertSuccess(all);
         testMergeInbox(all);
         testSend(all);
+        testDepositAuth(all);
     }
 
 private:
@@ -149,6 +150,8 @@ private:
     testMergeInbox(FeatureBitset features);
     void
     testSend(FeatureBitset features);
+    void
+    testDepositAuth(FeatureBitset features);
 
     static json::Value
     sendJV(
@@ -538,15 +541,15 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
 }
 
 void
-testDepositAuth(FeatureBitset features)
+ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
 {
     testcase("DepositAuth and Credentials enforcement");
     using namespace jtx;
 
-    Account const alice("alice");
-    Account const bob("bob");
-    Account const carol("carol");
-    Account const issuer("issuer");
+    Account const alice("alice");   // MPT issuer
+    Account const bob("bob");       // sender
+    Account const carol("carol");   // receiver
+    Account const credIssuer("credIssuer");  // Credential issuer (separate from MPT issuer)
 
     auto const issuerSk = cmpt::ElGamalSecretKey::random();
     auto const issuerPub = issuerSk.publicKey();
@@ -558,17 +561,26 @@ testDepositAuth(FeatureBitset features)
     std::string const credType = "abcdefgh";
 
     auto setup = [&](Env& env) -> MPTID {
+        // Fund the credential issuer account
+        env.fund(XRP(1000), credIssuer);
+        env.close();
+
         MPTTester mpt(env, alice, {.holders = {bob, carol}});
         mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
-        auto const id = mpt.issuanceID();
-        env(mpt::setEncryptionKey(alice, id, issuerPub));
-        env.close();
+        mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
         mpt.authorize({.account = bob});
         mpt.authorize({.account = carol});
-        env(mpt::setEncryptionKey(bob, id, bobPub));
-        env(mpt::setEncryptionKey(carol, id, carolPub));
-        env.close();
+        mpt.pay(alice, bob, 1000);
+        auto const id = mpt.issuanceID();
+        // Bob funds his confidential spending balance
         env(convertJV(bob, id, 1000, bobPub, issuerPub, bobSk.x));
+        env.close();
+        env(mergeJV(bob, id));
+        env.close();
+        // Carol opts in with zero-amount conversion
+        env(convertJV(carol, id, 0, carolPub, issuerPub, carolSk.x));
+        env.close();
+        env(mergeJV(carol, id));
         env.close();
         return id;
     };
@@ -596,17 +608,20 @@ testDepositAuth(FeatureBitset features)
             readSpending(env, id, bob));
         env(jv);
         env.close();
-        BEAST_EXPECT(env.balance(carol, id) == 400);
+        // Merge inbox to update balance
+        env(mergeJV(carol, id));
+        env.close();
+        BEAST_EXPECT(readSpending(env, id, carol).decrypt(carolSk.x, 2000) == 400);
     }
 
     {
         Env env{*this, features};
         auto const id = setup(env);
-        env(credentials::create(bob, issuer, credType));
+        env(credentials::create(bob, credIssuer, credType));
         env.close();
-        env(credentials::accept(bob, issuer, credType));
+        env(credentials::accept(bob, credIssuer, credType));
         env.close();
-        auto const jv = credentials::ledgerEntry(env, bob, issuer, credType);
+        auto const jv = credentials::ledgerEntry(env, bob, credIssuer, credType);
         std::string const credIdx = jv[jss::result][jss::index].asString();
         env(fset(carol, asfDepositAuth));
         env.close();
@@ -621,15 +636,15 @@ testDepositAuth(FeatureBitset features)
     {
         Env env{*this, features};
         auto const id = setup(env);
-        env(credentials::create(bob, issuer, credType));
+        env(credentials::create(bob, credIssuer, credType));
         env.close();
-        env(credentials::accept(bob, issuer, credType));
+        env(credentials::accept(bob, credIssuer, credType));
         env.close();
-        auto const jv = credentials::ledgerEntry(env, bob, issuer, credType);
+        auto const jv = credentials::ledgerEntry(env, bob, credIssuer, credType);
         std::string const credIdx = jv[jss::result][jss::index].asString();
         env(fset(carol, asfDepositAuth));
         env.close();
-        env(deposit::authCredentials(carol, {{.issuer = issuer, .credType = credType}}));
+        env(deposit::authCredentials(carol, {{.issuer = credIssuer, .credType = credType}}));
         env.close();
         auto jsend = sendJV(
             bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
@@ -638,7 +653,10 @@ testDepositAuth(FeatureBitset features)
         jsend[sfCredentialIDs.jsonName].append(credIdx);
         env(jsend);
         env.close();
-        BEAST_EXPECT(env.balance(carol, id) == 400);
+        // Merge inbox to update balance
+        env(mergeJV(carol, id));
+        env.close();
+        BEAST_EXPECT(readSpending(env, id, carol).decrypt(carolSk.x, 2000) == 400);
     }
 
     {
@@ -646,7 +664,7 @@ testDepositAuth(FeatureBitset features)
         auto const id = setup(env);
         env(fset(carol, asfDepositAuth));
         env.close();
-        env(deposit::authCredentials(carol, {{.issuer = issuer, .credType = credType}}));
+        env(deposit::authCredentials(carol, {{.issuer = credIssuer, .credType = credType}}));
         env.close();
         auto jsend = sendJV(
             bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
@@ -665,18 +683,11 @@ testDepositAuth(FeatureBitset features)
             readSpending(env, id, bob));
         env(jsend);
         env.close();
-        BEAST_EXPECT(env.balance(carol, id) == 400);
+        // Merge inbox to update balance
+        env(mergeJV(carol, id));
+        env.close();
+        BEAST_EXPECT(readSpending(env, id, carol).decrypt(carolSk.x, 2000) == 400);
     }
-}
-
-void
-run() override
-{
-    using namespace jtx;
-    auto const all = supported_amendments();
-    testConvert(all);
-    testSend(all);
-    testDepositAuth(all);
 }
 
 BEAST_DEFINE_TESTSUITE(ConfidentialMPTSendPath, app, xrpl);

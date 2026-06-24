@@ -1131,6 +1131,7 @@ TRANSACTION(ttMPTOKEN_CONFIDENTIAL_SEND, 88, ConfidentialMPTSend,
     {sfAmountCommitment, SoeRequired},
     {sfBalanceCommitment, SoeRequired},
     {sfZKProof, SoeRequired},
+    {sfCredentialIDs, SoeOptional},
 }))
 
 /** This transaction converts a holder's confidential MPT balance back into

@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTSend.h>
 
+#include <xrpl/ledger/helpers/CredentialHelpers.h>
 #include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/ConfidentialMPT.h>
 #include <xrpl/protocol/ECMath.h>
@@ -19,6 +20,12 @@
 #include <optional>
 
 namespace xrpl {
+
+bool
+ConfidentialMPTSend::checkExtraFeatures(PreflightContext const& ctx)
+{
+    return !ctx.tx.isFieldPresent(sfCredentialIDs) || ctx.rules.enabled(featureCredentials);
+}
 
 namespace {
 
@@ -153,6 +160,9 @@ ConfidentialMPTSend::preflight(PreflightContext const& ctx)
         !validPoint(ctx.tx[~sfBalanceCommitment]))
         return temMALFORMED;
 
+    if (auto const err = credentials::checkFields(ctx.tx, ctx.j); !isTesSuccess(err))
+        return err;
+
     return tesSUCCESS;
 }
 
@@ -205,6 +215,10 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     if (sleIssuance->isFlag(lsfMPTRequireAuth) &&
         (!sleSender->isFlag(lsfMPTAuthorized) || !sleDest->isFlag(lsfMPTAuthorized)))
         return tecNO_AUTH;
+
+    if (auto const err = credentials::valid(ctx.tx, ctx.view, ctx.tx[sfAccount], ctx.j);
+        !isTesSuccess(err))
+        return err;
 
     // --- Zero-knowledge verification ---
     auto const senderKey = loadPoint(*sleSender, sfHolderEncryptionKey);
@@ -263,10 +277,17 @@ TER
 ConfidentialMPTSend::doApply()
 {
     auto const id = ctx_.tx[sfMPTokenIssuanceID];
+    auto const dest = ctx_.tx[sfDestination];
     auto const sleSender = view().peek(keylet::mptoken(id, accountID_));
-    auto const sleDest = view().peek(keylet::mptoken(id, ctx_.tx[sfDestination]));
+    auto const sleDest = view().peek(keylet::mptoken(id, dest));
     if (!sleSender || !sleDest)
         return tecINTERNAL;  // LCOV_EXCL_LINE
+
+    auto const sleDestAccount = view().read(keylet::account(dest));
+    if (auto err = verifyDepositPreauth(
+            ctx_.tx, ctx_.view(), accountID_, dest, sleDestAccount, ctx_.journal);
+        !isTesSuccess(err))
+        return err;
 
     // Mirror the auditor ciphertext only when the issuance actually has an
     // auditor key, not merely when the tx field is present.

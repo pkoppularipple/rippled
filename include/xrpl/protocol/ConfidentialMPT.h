@@ -297,6 +297,13 @@ public:
     /// Serialized size: challenge + three response scalars.
     static constexpr std::size_t kSize = 4 * kScalarSize;
 
+    /// Exact serialized byte length (fixed; mirrors RangeProof::serializedSize).
+    static constexpr std::size_t
+    serializedSize()
+    {
+        return kSize;
+    }
+
     LinkageProof() = default;
     LinkageProof(Scalar e, Scalar zx, Scalar zm, Scalar zr)
         : e_(e), zx_(zx), zm_(zm), zr_(zr)
@@ -357,6 +364,13 @@ class PlaintextEqualityProof
 public:
     /// Serialized size: challenge + three response scalars.
     static constexpr std::size_t kSize = 4 * kScalarSize;
+
+    /// Exact serialized byte length (fixed; mirrors RangeProof::serializedSize).
+    static constexpr std::size_t
+    serializedSize()
+    {
+        return kSize;
+    }
 
     PlaintextEqualityProof() = default;
     PlaintextEqualityProof(Scalar e, Scalar zm, Scalar z1, Scalar z2)

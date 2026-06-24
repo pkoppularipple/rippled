@@ -55,8 +55,8 @@ struct SendProofs
 std::optional<SendProofs>
 parseSendProofs(Slice const& in, bool hasAuditor)
 {
-    constexpr std::size_t peq = cmpt::PlaintextEqualityProof::kSize;
-    constexpr std::size_t link = cmpt::LinkageProof::kSize;
+    constexpr std::size_t peq = cmpt::PlaintextEqualityProof::serializedSize();
+    constexpr std::size_t link = cmpt::LinkageProof::serializedSize();
     std::size_t const fixed = 2 * peq + (hasAuditor ? peq : 0) + 2 * link;
     if (in.size() < fixed + 2)
         return std::nullopt;

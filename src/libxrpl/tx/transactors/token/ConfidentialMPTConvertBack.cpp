@@ -52,7 +52,7 @@ struct ConvertBackProofs
 std::optional<ConvertBackProofs>
 parseConvertBackProofs(Slice const& in)
 {
-    constexpr std::size_t link = cmpt::LinkageProof::kSize;
+    constexpr std::size_t link = cmpt::LinkageProof::serializedSize();
     if (in.size() <= link + 1)
         return std::nullopt;
 

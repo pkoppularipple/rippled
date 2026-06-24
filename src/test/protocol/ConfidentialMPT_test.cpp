@@ -3,7 +3,9 @@
 #include <xrpl/protocol/ConfidentialMPT.h>
 #include <xrpl/protocol/ECMath.h>
 
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <optional>
 #include <vector>
@@ -428,6 +430,8 @@ ConfidentialMPT_test::testLinkageProof()
 
     // Serialization round-trip preserves verification.
     auto const sb = proof.serialize();
+    // Fixed serialized length matches the advertised serializedSize().
+    BEAST_EXPECT(sb.size() == LinkageProof::serializedSize());
     auto const back = LinkageProof::deserialize(Slice{sb.data(), sb.size()});
     BEAST_EXPECT(back.has_value() && back->verify(pk, ct, commitment));
 
@@ -437,8 +441,15 @@ ConfidentialMPT_test::testLinkageProof()
     auto const bad = LinkageProof::deserialize(Slice{tampered.data(), tampered.size()});
     BEAST_EXPECT(bad.has_value() && !bad->verify(pk, ct, commitment));
 
-    // Wrong-size blob fails to deserialize.
+    // Wrong-size blobs (short and long) fail to deserialize.
     BEAST_EXPECT(!LinkageProof::deserialize(Slice{sb.data(), sb.size() - 1}).has_value());
+    {
+        std::array<std::uint8_t, LinkageProof::serializedSize() + 1> oversize{};
+        std::memcpy(oversize.data(), sb.data(), sb.size());
+        BEAST_EXPECT(
+            !LinkageProof::deserialize(Slice{oversize.data(), oversize.size()})
+                 .has_value());
+    }
 }
 
 void
@@ -478,6 +489,8 @@ ConfidentialMPT_test::testPlaintextEqualityProof()
 
     // Serialization round-trip preserves verification.
     auto const sb = proof.serialize();
+    // Fixed serialized length matches the advertised serializedSize().
+    BEAST_EXPECT(sb.size() == PlaintextEqualityProof::serializedSize());
     auto const back =
         PlaintextEqualityProof::deserialize(Slice{sb.data(), sb.size()});
     BEAST_EXPECT(back.has_value() && back->verify(pk1, pk2, ct1, ct2));
@@ -489,8 +502,17 @@ ConfidentialMPT_test::testPlaintextEqualityProof()
         PlaintextEqualityProof::deserialize(Slice{tampered.data(), tampered.size()});
     BEAST_EXPECT(bad.has_value() && !bad->verify(pk1, pk2, ct1, ct2));
 
+    // Wrong-size blobs (short and long) fail to deserialize.
     BEAST_EXPECT(
         !PlaintextEqualityProof::deserialize(Slice{sb.data(), sb.size() - 1}).has_value());
+    {
+        std::array<std::uint8_t, PlaintextEqualityProof::serializedSize() + 1>
+            oversize{};
+        std::memcpy(oversize.data(), sb.data(), sb.size());
+        BEAST_EXPECT(!PlaintextEqualityProof::deserialize(
+                          Slice{oversize.data(), oversize.size()})
+                          .has_value());
+    }
 }
 
 BEAST_DEFINE_TESTSUITE(ConfidentialMPT, protocol, xrpl);

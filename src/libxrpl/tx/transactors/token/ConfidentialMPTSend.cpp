@@ -21,6 +21,12 @@
 
 namespace xrpl {
 
+bool
+ConfidentialMPTSend::checkExtraFeatures(PreflightContext const& ctx)
+{
+    return !ctx.tx.isFieldPresent(sfCredentialIDs) || ctx.rules.enabled(featureCredentials);
+}
+
 namespace {
 
 bool

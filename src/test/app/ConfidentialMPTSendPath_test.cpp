@@ -538,6 +538,18 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
                 issuerPub, cmpt::ElGamalCiphertext::encryptZero()),
             Ter(temDISABLED));
     }
+
+    // CredentialIDs requires featureCredentials.
+    {
+        Env env{*this, features - featureCredentials};
+        auto const id = setup(env);
+        auto jv = sendJV(
+            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        jv[sfCredentialIDs.jsonName] = json::ValueType::Array;
+        jv[sfCredentialIDs.jsonName].append("ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD");
+        env(jv, Ter(temDISABLED));
+    }
 }
 
 void

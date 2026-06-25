@@ -83,6 +83,11 @@ endif()
 include(deps/Boost)
 
 add_subdirectory(external/antithesis-sdk)
+
+# Add mpt-crypto (XLS-0096 Confidential MPT) - vendored at 8ac279d6df0d6c387ca6b1f4a47fdf5df4cfa9c9
+set(ENABLE_TESTS OFF CACHE BOOL "Disable mpt-crypto tests" FORCE)
+set(MPT_CRYPTO_WERROR OFF CACHE BOOL "Disable Werror for mpt-crypto" FORCE)
+add_subdirectory(external/mpt-crypto EXCLUDE_FROM_ALL)
 find_package(date REQUIRED)
 find_package(ed25519 REQUIRED)
 find_package(gRPC REQUIRED)
@@ -100,6 +105,7 @@ target_link_libraries(
     INTERFACE
         ed25519::ed25519
         lz4::lz4
+        mpt-crypto
         OpenSSL::Crypto
         OpenSSL::SSL
         secp256k1::secp256k1

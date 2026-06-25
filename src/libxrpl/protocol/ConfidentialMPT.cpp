@@ -2,6 +2,8 @@
 
 #include <xrpl/basics/contract.h>
 
+#include <secp256k1_mpt.h>
+
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -10,6 +12,12 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+// Verify mpt-crypto linkage: compact proof sizes match our stubs.
+static_assert(SECP256K1_POK_SK_PROOF_SIZE == 64);
+static_assert(SECP256K1_COMPACT_STANDARD_PROOF_SIZE == 192);
+static_assert(SECP256K1_COMPACT_CLAWBACK_PROOF_SIZE == 64);
+static_assert(SECP256K1_COMPACT_CONVERTBACK_PROOF_SIZE == 128);
 
 namespace xrpl {
 namespace cmpt {
@@ -1023,6 +1031,57 @@ PlaintextEqualityProof::deserialize(Slice const& in)
     Scalar const z1{Slice{in.data() + 2 * kScalarSize, kScalarSize}};
     Scalar const z2{Slice{in.data() + 3 * kScalarSize, kScalarSize}};
     return PlaintextEqualityProof{e, zm, z1, z2};
+}
+
+//------------------------------------------------------------------------------
+// CompactStandardProof (stub for XLS-0096 Phase 1)
+//------------------------------------------------------------------------------
+
+// TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
+CompactStandardProof
+CompactStandardProof::prove(
+    Scalar const&,
+    std::uint64_t,
+    std::uint64_t,
+    Scalar const&,
+    Scalar const&,
+    Scalar const&,
+    ElGamalPublicKey const&,
+    ElGamalCiphertext const&,
+    ElGamalCiphertext const&,
+    PedersenCommitment const&,
+    PedersenCommitment const&)
+{
+    return CompactStandardProof{};
+}
+
+// TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
+bool
+CompactStandardProof::verify(
+    ElGamalPublicKey const&,
+    ElGamalPublicKey const&,
+    ElGamalCiphertext const&,
+    ElGamalCiphertext const&,
+    PedersenCommitment const&,
+    PedersenCommitment const&) const
+{
+    return false;
+}
+
+std::array<std::uint8_t, CompactStandardProof::kSize>
+CompactStandardProof::serialize() const
+{
+    return data_;
+}
+
+std::optional<CompactStandardProof>
+CompactStandardProof::deserialize(Slice const& in)
+{
+    if (in.size() != kSize)
+        return std::nullopt;
+    CompactStandardProof proof;
+    std::memcpy(proof.data_.data(), in.data(), kSize);
+    return proof;
 }
 
 }  // namespace cmpt

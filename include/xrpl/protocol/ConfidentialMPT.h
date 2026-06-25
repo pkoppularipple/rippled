@@ -416,5 +416,62 @@ private:
     Scalar z2_;
 };
 
+//------------------------------------------------------------------------------
+
+/** Compact AND-composed sigma proof for standard EC-ElGamal send (XLS-0096).
+
+    Stub for Phase 1 integration. Placeholder for the compact sigma protocol
+    that replaces PlaintextEqualityProof + LinkageProof pairs in the send path
+    with a single 192-byte proof via AND composition. Real implementation comes
+    in Phase 2 (issue #14) using mpt-crypto proof_compact_standard.c.
+*/
+class CompactStandardProof
+{
+public:
+    static constexpr std::size_t kSize = 192;
+
+    static constexpr std::size_t
+    serializedSize()
+    {
+        return kSize;
+    }
+
+    CompactStandardProof() = default;
+
+    // TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
+    static CompactStandardProof
+    prove(
+        Scalar const& secret,
+        std::uint64_t amount,
+        std::uint64_t balance,
+        Scalar const& rShared,
+        Scalar const& rAmount,
+        Scalar const& rBalance,
+        ElGamalPublicKey const& recipientKey,
+        ElGamalCiphertext const& recipientCt,
+        ElGamalCiphertext const& postDebitCt,
+        PedersenCommitment const& amountCommit,
+        PedersenCommitment const& balanceCommit);
+
+    // TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
+    [[nodiscard]] bool
+    verify(
+        ElGamalPublicKey const& senderKey,
+        ElGamalPublicKey const& recipientKey,
+        ElGamalCiphertext const& recipientCt,
+        ElGamalCiphertext const& postDebitCt,
+        PedersenCommitment const& amountCommit,
+        PedersenCommitment const& balanceCommit) const;
+
+    [[nodiscard]] std::array<std::uint8_t, kSize>
+    serialize() const;
+
+    static std::optional<CompactStandardProof>
+    deserialize(Slice const& in);
+
+private:
+    std::array<std::uint8_t, kSize> data_{};
+};
+
 }  // namespace cmpt
 }  // namespace xrpl

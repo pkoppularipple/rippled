@@ -79,8 +79,8 @@ class ConfidentialMPTCrossVerify_test : public beast::unit_test::Suite
         // Direction (a): rippled prove → mpt-crypto verify
         // ----------------------------------------------------------
         {
-            auto const proof =
-                cmpt::CompactClawbackProof::prove(issuerSk, amount, issuerPub, issuerMirror);
+            auto const proof = cmpt::CompactClawbackProof::prove(
+                issuerSk, amount, issuerPub, issuerMirror, Slice{context_id, 32});
             auto const proofBytes = proof.serialize();
             BEAST_EXPECT(proofBytes.size() == 64);
 
@@ -111,32 +111,16 @@ class ConfidentialMPTCrossVerify_test : public beast::unit_test::Suite
             auto const proofOpt = cmpt::CompactClawbackProof::deserialize(
                 Slice{proof_out, sizeof(proof_out)});
             BEAST_EXPECT(proofOpt.has_value());
-            BEAST_EXPECT(proofOpt->verify(amount, issuerPub, issuerMirror));
+            BEAST_EXPECT(proofOpt->verify(
+                amount, issuerPub, issuerMirror, Slice{context_id, 32}));
         }
 
-        // ----------------------------------------------------------
-        // Byte-identical serialization check
-        // ----------------------------------------------------------
-        {
-            // rippled proof
-            auto const proof1 =
-                cmpt::CompactClawbackProof::prove(issuerSk, amount, issuerPub, issuerMirror);
-            auto const bytes1 = proof1.serialize();
-
-            // mpt-crypto proof
-            auto const sk_bytes = scalarBytes(issuerSk);
-            secp256k1_pubkey P_iss = toSecp(ctx, issuerPub);
-            secp256k1_pubkey C1 = toSecp(ctx, issuerMirror.c1());
-            secp256k1_pubkey C2 = toSecp(ctx, issuerMirror.c2());
-            unsigned char bytes2[64];
-            secp256k1_compact_clawback_prove(
-                ctx, bytes2, amount, sk_bytes.data(), &P_iss, &C1, &C2, context_id);
-
-            // Both should produce 64-byte proofs with IDENTICAL serialization
-            // (deterministic nonce from witness + domain tag)
-            BEAST_EXPECT(bytes1.size() == 64);
-            BEAST_EXPECT(std::memcmp(bytes1.data(), bytes2, 64) == 0);
-        }
+        // No byte-identical serialization check: mpt-crypto derives its sigma
+        // nonce via an HKDF salted with fresh per-call entropy
+        // (generate_deterministic_nonces), so two proofs of the same statement
+        // differ even reference-vs-reference. rippled likewise uses independent
+        // nonce randomness. Interoperability is established by the bidirectional
+        // verify checks above and does not depend on a shared nonce.
     }
 
     void
@@ -176,7 +160,8 @@ class ConfidentialMPTCrossVerify_test : public beast::unit_test::Suite
         // ----------------------------------------------------------
         {
             auto const proof = cmpt::CompactConvertBackProof::prove(
-                holderSk, balance, rho, holderPub, postDebit, balanceCommit);
+                holderSk, balance, rho, holderPub, postDebit, balanceCommit,
+                Slice{context_id, 32});
             auto const proofBytes = proof.serialize();
             BEAST_EXPECT(proofBytes.size() == 128);
 
@@ -219,31 +204,14 @@ class ConfidentialMPTCrossVerify_test : public beast::unit_test::Suite
             auto const proofOpt = cmpt::CompactConvertBackProof::deserialize(
                 Slice{proof_out, sizeof(proof_out)});
             BEAST_EXPECT(proofOpt.has_value());
-            BEAST_EXPECT(proofOpt->verify(holderPub, postDebit, balanceCommit));
+            BEAST_EXPECT(proofOpt->verify(
+                holderPub, postDebit, balanceCommit, Slice{context_id, 32}));
         }
 
-        // ----------------------------------------------------------
-        // Byte-identical serialization check
-        // ----------------------------------------------------------
-        {
-            auto const proof1 = cmpt::CompactConvertBackProof::prove(
-                holderSk, balance, rho, holderPub, postDebit, balanceCommit);
-            auto const bytes1 = proof1.serialize();
-
-            auto const sk_bytes = scalarBytes(holderSk);
-            auto const rho_bytes = scalarBytes(rho);
-            secp256k1_pubkey pk_A = toSecp(ctx, holderPub);
-            secp256k1_pubkey B1 = toSecp(ctx, postDebit.c1());
-            secp256k1_pubkey B2 = toSecp(ctx, postDebit.c2());
-            secp256k1_pubkey PC_b = toSecp(ctx, balanceCommit.point());
-            unsigned char bytes2[128];
-            secp256k1_compact_convertback_prove(
-                ctx, bytes2, balance, sk_bytes.data(), rho_bytes.data(),
-                &pk_A, &B1, &B2, &PC_b, context_id);
-
-            BEAST_EXPECT(bytes1.size() == 128);
-            BEAST_EXPECT(std::memcmp(bytes1.data(), bytes2, 128) == 0);
-        }
+        // No byte-identical serialization check: see the Clawback note above.
+        // mpt-crypto's salted HKDF nonce derivation makes proofs non-reproducible
+        // even reference-vs-reference; interop is established by the bidirectional
+        // verify checks above, not by equal bytes.
     }
 
 public:

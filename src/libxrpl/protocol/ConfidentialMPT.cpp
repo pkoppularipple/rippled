@@ -1,6 +1,7 @@
 #include <xrpl/protocol/ConfidentialMPT.h>
 
 #include <xrpl/basics/contract.h>
+#include <xrpl/protocol/digest.h>
 
 #include <secp256k1_mpt.h>
 
@@ -1039,6 +1040,28 @@ PlaintextEqualityProof::deserialize(Slice const& in)
 
 namespace {
 
+// SHA-256 Fiat-Shamir challenge for the compact AND-composed sigma proofs,
+// matching mpt-crypto byte-for-byte: e = reduce32(SHA256(domain || parts ||
+// context_id)). The reference hashes with SHA-256 (not SHA-512 like the
+// generic hashToScalar), so byte-for-byte interop requires SHA-256 here. The
+// 32-byte contextId is appended only when non-empty (the reference's optional
+// context_id; an empty Slice matches a NULL context_id and appends nothing).
+Scalar
+compactChallenge(
+    Slice const& domain,
+    std::vector<Slice> const& parts,
+    Slice const& contextId)
+{
+    OpensslSha256Hasher h;
+    h(domain.data(), domain.size());
+    for (auto const& p : parts)
+        h(p.data(), p.size());
+    if (contextId.size())
+        h(contextId.data(), contextId.size());
+    auto const digest = OpensslSha256Hasher::result_type(h);
+    return Scalar(Slice{digest.data(), digest.size()});
+}
+
 Slice
 domainClawback()
 {
@@ -1052,7 +1075,8 @@ CompactClawbackProof::prove(
     Scalar const& secret,
     std::uint64_t amount,
     ElGamalPublicKey const& pub,
-    ElGamalCiphertext const& issuerMirror)
+    ElGamalCiphertext const& issuerMirror,
+    Slice const& contextId)
 {
     if (secret.isZero() || pub.isInfinity())
         Throw<std::runtime_error>(
@@ -1074,14 +1098,15 @@ CompactClawbackProof::prove(
     auto const mgb = mG.serialize();
     auto const t1b = T1.serialize();
     auto const t2b = T2.serialize();
-    Scalar const e = hashToScalar(
+    Scalar const e = compactChallenge(
         domainClawback(),
         {Slice{pb.data(), pb.size()},
          Slice{c1b.data(), c1b.size()},
          Slice{c2b.data(), c2b.size()},
          Slice{mgb.data(), mgb.size()},
          Slice{t1b.data(), t1b.size()},
-         Slice{t2b.data(), t2b.size()}});
+         Slice{t2b.data(), t2b.size()}},
+        contextId);
 
     // Response: z_sk = w + e*secret.
     Scalar const zsk = w + e * secret;
@@ -1092,7 +1117,8 @@ bool
 CompactClawbackProof::verify(
     std::uint64_t amount,
     ElGamalPublicKey const& pub,
-    ElGamalCiphertext const& issuerMirror) const
+    ElGamalCiphertext const& issuerMirror,
+    Slice const& contextId) const
 {
     if (pub.isInfinity())
         return false;
@@ -1114,14 +1140,15 @@ CompactClawbackProof::verify(
     auto const mgb = mG.serialize();
     auto const t1b = T1.serialize();
     auto const t2b = T2.serialize();
-    Scalar const e = hashToScalar(
+    Scalar const e = compactChallenge(
         domainClawback(),
         {Slice{pb.data(), pb.size()},
          Slice{c1b.data(), c1b.size()},
          Slice{c2b.data(), c2b.size()},
          Slice{mgb.data(), mgb.size()},
          Slice{t1b.data(), t1b.size()},
-         Slice{t2b.data(), t2b.size()}});
+         Slice{t2b.data(), t2b.size()}},
+        contextId);
     return e == e_;
 }
 
@@ -1165,7 +1192,8 @@ CompactConvertBackProof::prove(
     Scalar const& rho,
     ElGamalPublicKey const& pub,
     ElGamalCiphertext const& postDebit,
-    PedersenCommitment const& balanceCommit)
+    PedersenCommitment const& balanceCommit,
+    Slice const& contextId)
 {
     if (secret.isZero() || pub.isInfinity())
         Throw<std::runtime_error>(
@@ -1196,7 +1224,7 @@ CompactConvertBackProof::prove(
     auto const t1b = T_sk1.serialize();
     auto const t2b = T_sk2.serialize();
     auto const tbb = T_b.serialize();
-    Scalar const e = hashToScalar(
+    Scalar const e = compactChallenge(
         domainConvertBack(),
         {Slice{pkb.data(), pkb.size()},
          Slice{b1b.data(), b1b.size()},
@@ -1204,7 +1232,8 @@ CompactConvertBackProof::prove(
          Slice{pcb.data(), pcb.size()},
          Slice{t1b.data(), t1b.size()},
          Slice{t2b.data(), t2b.size()},
-         Slice{tbb.data(), tbb.size()}});
+         Slice{tbb.data(), tbb.size()}},
+        contextId);
 
     // Responses:
     // z_sk  = w_sk  + e*secret
@@ -1220,7 +1249,8 @@ bool
 CompactConvertBackProof::verify(
     ElGamalPublicKey const& pub,
     ElGamalCiphertext const& postDebit,
-    PedersenCommitment const& balanceCommit) const
+    PedersenCommitment const& balanceCommit,
+    Slice const& contextId) const
 {
     if (pub.isInfinity())
         return false;
@@ -1245,7 +1275,7 @@ CompactConvertBackProof::verify(
     auto const t1b = T_sk1.serialize();
     auto const t2b = T_sk2.serialize();
     auto const tbb = T_b.serialize();
-    Scalar const e = hashToScalar(
+    Scalar const e = compactChallenge(
         domainConvertBack(),
         {Slice{pkb.data(), pkb.size()},
          Slice{b1b.data(), b1b.size()},
@@ -1253,7 +1283,8 @@ CompactConvertBackProof::verify(
          Slice{pcb.data(), pcb.size()},
          Slice{t1b.data(), t1b.size()},
          Slice{t2b.data(), t2b.size()},
-         Slice{tbb.data(), tbb.size()}});
+         Slice{tbb.data(), tbb.size()}},
+        contextId);
     return e == e_;
 }
 

@@ -22,11 +22,19 @@ namespace cmpt {
     Wire-format note: this slice fixes the in-memory algebra and a natural
     serialization (33-byte compressed points, 32-byte big-endian scalars). The
     range proof is a self-contained, sound Bulletproof (logarithmic proof size).
-    Byte-for-byte compatibility with the reference mpt-crypto library is not yet
-    asserted: that library and its Bulletproofs known-answer vectors are not
-    reachable from this build, so the encoding below is self-consistent only
-    (prove/verify round-trips and soundness) and is reconciled with mpt-crypto
-    when those vectors become available.
+
+    The compact AND-composed sigma proofs (CompactClawbackProof,
+    CompactConvertBackProof) are transcript-reconciled with the reference
+    mpt-crypto library: a SHA-256 Fiat-Shamir challenge over the same statement
+    ordering, 33-byte compressed points, 32-byte big-endian scalars, and an
+    optional 32-byte context_id. They cross-verify bidirectionally with
+    mpt-crypto (each implementation verifies the other's proofs). Proofs are
+    NOT bit-reproducible across implementations because the prover's nonce is
+    independent randomness (mpt-crypto salts its deterministic-nonce HKDF with
+    fresh entropy), but interoperability does not depend on a shared nonce. The
+    aggregated Bulletproof range proof remains self-consistent only, as the
+    reference C API exposes no standalone range-proof entrypoint. Send (tt88)
+    intentionally diverges (Option C, independent per-ciphertext randomness).
 */
 
 /// Serialized size of an EC-ElGamal public key (one compressed point).
@@ -448,13 +456,15 @@ public:
         Scalar const& secret,
         std::uint64_t amount,
         ElGamalPublicKey const& pub,
-        ElGamalCiphertext const& issuerMirror);
+        ElGamalCiphertext const& issuerMirror,
+        Slice const& contextId = {});
 
     [[nodiscard]] bool
     verify(
         std::uint64_t amount,
         ElGamalPublicKey const& pub,
-        ElGamalCiphertext const& issuerMirror) const;
+        ElGamalCiphertext const& issuerMirror,
+        Slice const& contextId = {}) const;
 
     [[nodiscard]] std::array<std::uint8_t, kSize>
     serialize() const;
@@ -503,13 +513,15 @@ public:
         Scalar const& rho,
         ElGamalPublicKey const& pub,
         ElGamalCiphertext const& postDebit,
-        PedersenCommitment const& balanceCommit);
+        PedersenCommitment const& balanceCommit,
+        Slice const& contextId = {});
 
     [[nodiscard]] bool
     verify(
         ElGamalPublicKey const& pub,
         ElGamalCiphertext const& postDebit,
-        PedersenCommitment const& balanceCommit) const;
+        PedersenCommitment const& balanceCommit,
+        Slice const& contextId = {}) const;
 
     [[nodiscard]] std::array<std::uint8_t, kSize>
     serialize() const;

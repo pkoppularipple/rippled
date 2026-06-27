@@ -1167,7 +1167,6 @@ TRANSACTION(ttMPTOKEN_CLAWBACK_CONFIDENTIAL, 89, ConfidentialMPTClawback,
     {sfMPTokenIssuanceID, SoeRequired},
     {sfHolder, SoeRequired},
     {sfMPTAmount, SoeRequired},
-    {sfBlindingFactor, SoeRequired},
     {sfZKProof, SoeRequired},
 }))
 

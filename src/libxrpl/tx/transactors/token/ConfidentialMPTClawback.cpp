@@ -46,9 +46,6 @@ ConfidentialMPTClawback::preflight(PreflightContext const& ctx)
     if (ctx.tx[sfHolder] == ctx.tx[sfAccount])
         return temMALFORMED;
 
-    if (ctx.tx[sfBlindingFactor].size() != cmpt::kScalarSize)
-        return temMALFORMED;
-
     // The ZKProof carries exactly one compact clawback proof (64 B).
     if (ctx.tx[sfZKProof].size() != cmpt::CompactClawbackProof::serializedSize())
         return temMALFORMED;

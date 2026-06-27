@@ -209,13 +209,21 @@ ECPoint
 ECPoint::generatorH()
 {
     static ECPoint const h = [] {
-        auto const g = base().serialize();
-        static constexpr char kDomain[] = "XLS96-MPT/H/v1";
-        return hashToPoint(
-            Slice{
-                reinterpret_cast<std::uint8_t const*>(kDomain),
-                sizeof(kDomain) - 1},
-            Slice{g.data(), g.size()});
+        // NUMS derivation byte-identical to mpt-crypto's
+        // secp256k1_mpt_hash_to_point_nums(label="H", len=1, index=0):
+        //   SHA256("MPT_BULLETPROOF_V1_NUMS" || "secp256k1" || "H" ||
+        //          idx_be32(0) || ctr_be32), candidate = 0x02 || digest.
+        // hashToPoint appends ctr_be32 internally, so the NUMS prefix (tag ||
+        // curve || label || index) is the domain and the data is empty.
+        // Matching H is required for byte-for-byte interop of the H-dependent
+        // compact ConvertBack proof with the reference mpt-crypto library.
+        static constexpr std::uint8_t kNumsH[] = {
+            'M', 'P', 'T', '_', 'B', 'U', 'L', 'L', 'E', 'T', 'P', 'R',
+            'O', 'O', 'F', '_', 'V', '1', '_', 'N', 'U', 'M', 'S',
+            's', 'e', 'c', 'p', '2', '5', '6', 'k', '1',
+            'H',
+            0x00, 0x00, 0x00, 0x00};
+        return hashToPoint(Slice{kNumsH, sizeof(kNumsH)}, Slice{kNumsH, 0});
     }();
     return h;
 }

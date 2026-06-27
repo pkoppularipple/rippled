@@ -55,8 +55,8 @@ parseConvertBackProofs(Slice const& in)
     constexpr std::size_t compact = cmpt::CompactConvertBackProof::serializedSize();
     constexpr std::uint8_t bits = 63;
     // Range proof size WITHOUT the leading width byte: 688 bytes.
-    constexpr std::size_t rangeSize = cmpt::RangeProof::serializedSize(bits) - 1;
-    constexpr std::size_t total = compact + rangeSize;
+    std::size_t const rangeSize = cmpt::RangeProof::serializedSize(bits) - 1;
+    std::size_t const total = compact + rangeSize;
 
     if (in.size() != total)
         return std::nullopt;

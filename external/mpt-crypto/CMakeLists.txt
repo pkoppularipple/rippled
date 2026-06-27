@@ -10,11 +10,11 @@ find_package(secp256k1 REQUIRED)
 # via Conan) can disable it: third-party toolchains may inject flags that emit
 # warnings outside our control (e.g. -Wunused-command-line-argument).
 option(MPT_CRYPTO_WERROR "Treat compiler warnings as errors" ON)
-add_library(common INTERFACE)
+add_library(mpt_crypto_common INTERFACE)
 if(NOT MSVC)
-    target_compile_options(common INTERFACE -Wall -Wextra -Wpedantic)
+    target_compile_options(mpt_crypto_common INTERFACE -Wall -Wextra -Wpedantic)
     if(MPT_CRYPTO_WERROR)
-        target_compile_options(common INTERFACE -Werror)
+        target_compile_options(mpt_crypto_common INTERFACE -Werror)
     endif()
 endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -37,7 +37,7 @@ add_library(
 target_include_directories(mpt-crypto PUBLIC include)
 
 # --- Link Common Options ---
-target_link_libraries(mpt-crypto PUBLIC common)
+target_link_libraries(mpt-crypto PUBLIC mpt_crypto_common)
 
 # --- Set Compile Definitions ---
 include(CheckTypeSize)

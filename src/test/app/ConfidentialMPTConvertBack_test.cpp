@@ -84,8 +84,9 @@ class ConfidentialMPTConvertBack_test : public beast::unit_test::Suite
 
     // Build a ConfidentialMPTConvertBack JSON. The withdrawn amount is public
     // (verified deterministically via the shared blinding factor); the ZKProof
-    // bundle proves the post-debit spending balance (== remaining) is valid and
-    // non-negative through a linkage proof plus a range proof.
+    // bundle (816 bytes) proves the post-debit spending balance (== remaining) is
+    // valid and non-negative through a compact sigma proof (128 B) plus a range
+    // proof (688 B, implicit 63-bit width).
     static json::Value
     convertBackJV(
         jtx::Account const& account,
@@ -106,15 +107,18 @@ class ConfidentialMPTConvertBack_test : public beast::unit_test::Suite
         auto const postDebit = spending - holderCt;
         Scalar const rb = Scalar::random();
         auto const [rangeBalance, balanceCommit] = RangeProof::prove(remaining, rb, 63);
-        auto const linkBalance =
-            LinkageProof::prove(holderSecret, remaining, rb, postDebit, balanceCommit);
+        auto const compactBalance = CompactConvertBackProof::prove(
+            holderSecret, remaining, rb, holderPub, postDebit, balanceCommit);
 
         Blob bundle;
         auto append = [&](auto const& a) {
             bundle.insert(bundle.end(), a.begin(), a.end());
         };
-        append(linkBalance.serialize());
-        append(rangeBalance.serialize());
+        append(compactBalance.serialize());
+        // Range proof serialization: strip the leading width byte to match
+        // mpt-crypto's implicit-width Bulletproof encoding.
+        auto const rangeBytes = rangeBalance.serialize();
+        bundle.insert(bundle.end(), rangeBytes.begin() + 1, rangeBytes.end());
 
         json::Value jv;
         jv[jss::TransactionType] = "ConfidentialMPTConvertBack";

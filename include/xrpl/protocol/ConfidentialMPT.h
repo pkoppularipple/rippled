@@ -418,12 +418,126 @@ private:
 
 //------------------------------------------------------------------------------
 
+/** Compact AND-composed sigma proof for Clawback (XLS-0096, issue #13).
+
+    Proves knowledge of issuer secret key sk_iss such that:
+      - P_iss = sk_iss*G           (issuer public key)
+      - C2 - m*G = sk_iss*C1       (issuer mirror ciphertext decrypts to amount m)
+
+    Compact proof: (e, z_sk) in Z_q^2 = 64 bytes.
+    Domain: "CMPT_CLAWBACK_SIGMA"
+*/
+class CompactClawbackProof
+{
+public:
+    static constexpr std::size_t kSize = 64;
+
+    static constexpr std::size_t
+    serializedSize()
+    {
+        return kSize;
+    }
+
+    CompactClawbackProof() = default;
+    CompactClawbackProof(Scalar e, Scalar zsk) : e_(e), zsk_(zsk)
+    {
+    }
+
+    static CompactClawbackProof
+    prove(
+        Scalar const& secret,
+        std::uint64_t amount,
+        ElGamalPublicKey const& pub,
+        ElGamalCiphertext const& issuerMirror);
+
+    [[nodiscard]] bool
+    verify(
+        std::uint64_t amount,
+        ElGamalPublicKey const& pub,
+        ElGamalCiphertext const& issuerMirror) const;
+
+    [[nodiscard]] std::array<std::uint8_t, kSize>
+    serialize() const;
+
+    static std::optional<CompactClawbackProof>
+    deserialize(Slice const& in);
+
+private:
+    Scalar e_;
+    Scalar zsk_;
+};
+
+//------------------------------------------------------------------------------
+
+/** Compact AND-composed sigma proof for ConvertBack (XLS-0096, issue #14 partial).
+
+    Proves knowledge of (sk_A, b, rho) such that:
+      - P_A = sk_A*G                 (holder public key)
+      - B2 - b*G = sk_A*B1           (post-debit balance ciphertext decrypts to b)
+      - PC_b = b*G + rho*H           (balance commitment)
+
+    Compact proof: (e, z_b, z_rho, z_sk) in Z_q^4 = 128 bytes.
+    Domain: "CMPT_CONVERTBACK_SIGMA"
+*/
+class CompactConvertBackProof
+{
+public:
+    static constexpr std::size_t kSize = 128;
+
+    static constexpr std::size_t
+    serializedSize()
+    {
+        return kSize;
+    }
+
+    CompactConvertBackProof() = default;
+    CompactConvertBackProof(Scalar e, Scalar zb, Scalar zrho, Scalar zsk)
+        : e_(e), zb_(zb), zrho_(zrho), zsk_(zsk)
+    {
+    }
+
+    static CompactConvertBackProof
+    prove(
+        Scalar const& secret,
+        std::uint64_t balance,
+        Scalar const& rho,
+        ElGamalPublicKey const& pub,
+        ElGamalCiphertext const& postDebit,
+        PedersenCommitment const& balanceCommit);
+
+    [[nodiscard]] bool
+    verify(
+        ElGamalPublicKey const& pub,
+        ElGamalCiphertext const& postDebit,
+        PedersenCommitment const& balanceCommit) const;
+
+    [[nodiscard]] std::array<std::uint8_t, kSize>
+    serialize() const;
+
+    static std::optional<CompactConvertBackProof>
+    deserialize(Slice const& in);
+
+private:
+    Scalar e_;
+    Scalar zb_;
+    Scalar zrho_;
+    Scalar zsk_;
+};
+
+//------------------------------------------------------------------------------
+
 /** Compact AND-composed sigma proof for standard EC-ElGamal send (XLS-0096).
 
     Stub for Phase 1 integration. Placeholder for the compact sigma protocol
     that replaces PlaintextEqualityProof + LinkageProof pairs in the send path
     with a single 192-byte proof via AND composition. Real implementation comes
     in Phase 2 (issue #14) using mpt-crypto proof_compact_standard.c.
+
+    NOTE: rippled's Send (ConfidentialMPTSend, tt88) uses INDEPENDENT
+    randomness per ciphertext by deliberate design (Option C); Send proofs
+    therefore intentionally do NOT cross-verify byte-for-byte with the
+    reference mpt-crypto CompactStandardProof, which assumes shared
+    randomness.
 */
 class CompactStandardProof
 {

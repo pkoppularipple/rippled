@@ -37,42 +37,48 @@ validPoint(std::optional<Slice> const& s)
         cmpt::ECPoint::deserialize(*s).has_value();
 }
 
-// Layout of the ZKProof bundle carried by ConfidentialMPTConvertBack: a linkage
-// proof binding sfBalanceCommitment to the post-debit spending balance (balance
-// ownership and key linkage) followed by a logarithmic aggregated-Bulletproof
-// range proof proving the remaining balance is non-negative. This is the same
-// encoding the send path uses for its balance half; the range proof is
-// self-describing via its leading bit-width byte.
+// Layout of the ZKProof bundle carried by ConfidentialMPTConvertBack: a compact
+// AND-composed sigma proof (128 bytes) binding sfBalanceCommitment to the
+// post-debit spending balance, followed by a logarithmic aggregated-Bulletproof
+// range proof (688 bytes) proving the remaining balance is non-negative. Total:
+// 816 bytes. The range proof encodes 63 bits WITHOUT the leading width byte
+// (implicit width, matching mpt-crypto's Bulletproof serialization).
 struct ConvertBackProofs
 {
-    cmpt::LinkageProof linkBalance;
+    cmpt::CompactConvertBackProof compactBalance;
     cmpt::RangeProof rangeBalance;
 };
 
 std::optional<ConvertBackProofs>
 parseConvertBackProofs(Slice const& in)
 {
-    constexpr std::size_t link = cmpt::LinkageProof::serializedSize();
-    if (in.size() <= link + 1)
+    constexpr std::size_t compact = cmpt::CompactConvertBackProof::serializedSize();
+    constexpr std::uint8_t bits = 63;
+    // Range proof size WITHOUT the leading width byte: 688 bytes.
+    constexpr std::size_t rangeSize = cmpt::RangeProof::serializedSize(bits) - 1;
+    constexpr std::size_t total = compact + rangeSize;
+
+    if (in.size() != total)
         return std::nullopt;
 
-    auto const lb = cmpt::LinkageProof::deserialize(Slice{in.data(), link});
-    if (!lb)
+    auto const cb =
+        cmpt::CompactConvertBackProof::deserialize(Slice{in.data(), compact});
+    if (!cb)
         return std::nullopt;
 
-    // The range proof is self-describing: byte 0 is the bit width.
-    std::size_t const rem = in.size() - link;
-    std::uint8_t const bits = in.data()[link];
-    if (bits == 0 || bits > cmpt::RangeProof::kMaxBits)
-        return std::nullopt;
-    if (rem != cmpt::RangeProof::serializedSize(bits))
-        return std::nullopt;
-    auto const rb = cmpt::RangeProof::deserialize(Slice{in.data() + link, rem});
-    if (!rb)
+    // Prepend the width byte for deserialization, then strip it from the proof.
+    Blob rangeWithWidth;
+    rangeWithWidth.reserve(rangeSize + 1);
+    rangeWithWidth.push_back(bits);
+    rangeWithWidth.insert(
+        rangeWithWidth.end(), in.data() + compact, in.data() + total);
+    auto const rb = cmpt::RangeProof::deserialize(
+        Slice{rangeWithWidth.data(), rangeWithWidth.size()});
+    if (!rb || rb->bits() != bits)
         return std::nullopt;
 
     ConvertBackProofs p;
-    p.linkBalance = *lb;
+    p.compactBalance = *cb;
     p.rangeBalance = *rb;
     return p;
 }
@@ -199,10 +205,10 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
             return tecBAD_PROOF;
     }
 
-    // Post-debit spending balance must be valid and non-negative. The balance
-    // ciphertext is debited homomorphically, and the holder proves through
-    // knowledge of their secret key that sfBalanceCommitment encodes the same
-    // remaining balance; the range proof then proves it is non-negative.
+    // Post-debit spending balance must be valid and non-negative. The compact
+    // AND-composed sigma proof verifies ownership (P_A = sk_A*G), ciphertext
+    // linkage (B2 - b*G = sk_A*B1), and commitment binding (PC_b = b*G + rho*H).
+    // The range proof then proves the balance is non-negative.
     auto const balanceCommit =
         *cmpt::PedersenCommitment::deserialize(ctx.tx[sfBalanceCommitment]);
     auto const holderCt =
@@ -214,7 +220,7 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     if (!proofs)
         return tecBAD_PROOF;
 
-    if (!proofs->linkBalance.verify(*holderKey, postDebit, balanceCommit) ||
+    if (!proofs->compactBalance.verify(*holderKey, postDebit, balanceCommit) ||
         !proofs->rangeBalance.verify(balanceCommit))
         return tecBAD_PROOF;
 

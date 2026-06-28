@@ -220,13 +220,16 @@ ConfidentialMPTConvertBack::preclaim(PreclaimContext const& ctx)
     // context_id commits to the spending account, issuance, transaction
     // sequence, and the pre-transaction confidential balance version, matching
     // the reference mpt-crypto convert-back preimage. doApply() bumps the
-    // version afterward, so each spend consumes a distinct context.
+    // version afterward, so each spend consumes a distinct context. Use the
+    // SeqProxy value rather than sfSequence directly so ticketed transactions
+    // (sfSequence == 0) bind to their unique ticket number; a ticket and a
+    // sequence can never collide on the same account.
     std::uint32_t const version =
         sleToken->isFieldPresent(sfConfidentialBalanceVersion)
         ? sleToken->getFieldU32(sfConfidentialBalanceVersion)
         : 0u;
     auto const contextId = cmpt::convertBackContextId(
-        ctx.tx[sfAccount], id, ctx.tx[sfSequence], version);
+        ctx.tx[sfAccount], id, ctx.tx.getSeqValue(), version);
 
     auto const proofs = parseConvertBackProofs(ctx.tx[sfZKProof]);
     if (!proofs)

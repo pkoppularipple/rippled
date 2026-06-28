@@ -4,6 +4,7 @@
 #include <xrpl/protocol/digest.h>
 
 #include <secp256k1_mpt.h>
+#include <utility/mpt_utility.h>
 
 #include <algorithm>
 #include <array>
@@ -1360,6 +1361,66 @@ CompactStandardProof::deserialize(Slice const& in)
     CompactStandardProof proof;
     std::memcpy(proof.data_.data(), in.data(), kSize);
     return proof;
+}
+
+//------------------------------------------------------------------------------
+
+namespace {
+
+account_id
+toAccountId(AccountID const& a)
+{
+    account_id out{};
+    static_assert(sizeof(out.bytes) == AccountID::size());
+    std::memcpy(out.bytes, a.data(), sizeof(out.bytes));
+    return out;
+}
+
+mpt_issuance_id
+toIssuanceId(MPTID const& id)
+{
+    mpt_issuance_id out{};
+    static_assert(sizeof(out.bytes) == MPTID::size());
+    std::memcpy(out.bytes, id.data(), sizeof(out.bytes));
+    return out;
+}
+
+}  // namespace
+
+std::array<std::uint8_t, kContextIdSize>
+clawbackContextId(
+    AccountID const& issuer,
+    MPTID const& issuanceId,
+    std::uint32_t sequence,
+    AccountID const& holder)
+{
+    std::array<std::uint8_t, kContextIdSize> out{};
+    if (mpt_get_clawback_context_hash(
+            toAccountId(issuer),
+            toIssuanceId(issuanceId),
+            sequence,
+            toAccountId(holder),
+            out.data()) != 0)
+        Throw<std::runtime_error>("clawbackContextId: derivation failed");
+    return out;
+}
+
+std::array<std::uint8_t, kContextIdSize>
+convertBackContextId(
+    AccountID const& account,
+    MPTID const& issuanceId,
+    std::uint32_t sequence,
+    std::uint32_t version)
+{
+    std::array<std::uint8_t, kContextIdSize> out{};
+    if (mpt_get_convert_back_context_hash(
+            toAccountId(account),
+            toIssuanceId(issuanceId),
+            sequence,
+            version,
+            out.data()) != 0)
+        Throw<std::runtime_error>("convertBackContextId: derivation failed");
+    return out;
 }
 
 }  // namespace cmpt

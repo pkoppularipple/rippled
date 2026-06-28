@@ -1,7 +1,9 @@
 #pragma once
 
 #include <xrpl/basics/Slice.h>
+#include <xrpl/protocol/AccountID.h>
 #include <xrpl/protocol/ECMath.h>
+#include <xrpl/protocol/UintTypes.h>
 
 #include <array>
 #include <cstdint>
@@ -598,6 +600,44 @@ public:
 private:
     std::array<std::uint8_t, kSize> data_{};
 };
+
+//------------------------------------------------------------------------------
+
+/// Size of a transaction context_id (sha512_half output).
+inline constexpr std::size_t kContextIdSize = 32;
+
+/** Transaction context_id binding for XLS-0096 replay/domain separation.
+
+    Each confidential spend or burn binds its compact sigma proof to a 32-byte
+    context_id derived from the transaction's identity, so a proof captured on
+    one transaction cannot be replayed on another. The derivation matches the
+    reference mpt-crypto library byte-for-byte: sha512_half over a fixed 74-byte
+    preimage built from the big-endian transaction type, account id, issuance
+    id, sequence, and a per-type tail. Prover and verifier therefore agree
+    across implementations.
+
+    Pass the returned bytes as the `contextId` Slice to the matching
+    CompactClawbackProof / CompactConvertBackProof prove() and verify() calls.
+*/
+
+/// Clawback context_id: binds the issuer account, issuance, transaction
+/// sequence, and the targeted holder. Mirrors mpt_get_clawback_context_hash.
+[[nodiscard]] std::array<std::uint8_t, kContextIdSize>
+clawbackContextId(
+    AccountID const& issuer,
+    MPTID const& issuanceId,
+    std::uint32_t sequence,
+    AccountID const& holder);
+
+/// ConvertBack context_id: binds the spending account, issuance, transaction
+/// sequence, and the pre-transaction confidential balance version. Mirrors
+/// mpt_get_convert_back_context_hash.
+[[nodiscard]] std::array<std::uint8_t, kContextIdSize>
+convertBackContextId(
+    AccountID const& account,
+    MPTID const& issuanceId,
+    std::uint32_t sequence,
+    std::uint32_t version);
 
 }  // namespace cmpt
 }  // namespace xrpl

@@ -93,6 +93,7 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
     // issuer's secret key.
     static json::Value
     clawbackJV(
+        jtx::Env& env,
         jtx::Account const& issuer,
         jtx::Account const& holder,
         MPTID const& id,
@@ -102,8 +103,17 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
     {
         using namespace cmpt;
         auto const issuerPub = ECPoint::mulBase(issuerSecret);
-        auto const proof =
-            CompactClawbackProof::prove(issuerSecret, amount, issuerPub, issuerMirror);
+        // Bind the proof to the transaction the issuer is about to submit; the
+        // verifier recomputes the same context from the tx account, sequence,
+        // and holder. env.seq(issuer) equals the sequence jtx will autofill.
+        auto const contextId =
+            clawbackContextId(issuer.id(), id, env.seq(issuer), holder.id());
+        auto const proof = CompactClawbackProof::prove(
+            issuerSecret,
+            amount,
+            issuerPub,
+            issuerMirror,
+            Slice{contextId.data(), contextId.size()});
 
         json::Value jv;
         jv[jss::TransactionType] = "ConfidentialMPTClawback";
@@ -177,7 +187,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         MPTTester mpt(env, alice, {.holders = {bob}});
         mpt.create({.flags = tfMPTCanTransfer | tfMPTCanClawback});
         mpt.authorize({.account = bob});
-        env(clawbackJV(alice, bob, mpt.issuanceID(), 1, issuerSk.x, zero),
+        env(clawbackJV(env, alice, bob, mpt.issuanceID(), 1, issuerSk.x, zero),
             Ter(temDISABLED));
     }
 
@@ -185,7 +195,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
     {
         Env env{*this, features};
         auto const id = setup(env, 400);
-        env(clawbackJV(bob, bob, id, 400, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance)),
+        env(clawbackJV(env, bob, bob, id, 400, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance)),
             Ter(temMALFORMED));
     }
 
@@ -193,7 +203,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
     {
         Env env{*this, features};
         auto const id = setup(env, 400);
-        env(clawbackJV(alice, alice, id, 400, issuerSk.x, zero),
+        env(clawbackJV(env, alice, alice, id, 400, issuerSk.x, zero),
             Ter(temMALFORMED));
     }
 
@@ -201,7 +211,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
     {
         Env env{*this, features};
         auto const id = setup(env, 400);
-        env(clawbackJV(alice, bob, id, 0, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance)),
+        env(clawbackJV(env, alice, bob, id, 0, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance)),
             Ter(temBAD_AMOUNT));
     }
 
@@ -213,7 +223,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         mpt.create({.flags = tfMPTCanTransfer | tfMPTCanClawback});
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
-        env(clawbackJV(alice, bob, mpt.issuanceID(), 100, issuerSk.x, zero),
+        env(clawbackJV(env, alice, bob, mpt.issuanceID(), 100, issuerSk.x, zero),
             Ter(tecNO_PERMISSION));
     }
 
@@ -228,7 +238,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         env(convertJV(bob, mpt.issuanceID(), 400, bobPub, issuerPub, bobSk.x));
         env.close();
         env(clawbackJV(
-                alice, bob, mpt.issuanceID(), 400, issuerSk.x,
+                env, alice, bob, mpt.issuanceID(), 400, issuerSk.x,
                 readCt(env, mpt.issuanceID(), bob, sfIssuerEncryptedBalance)),
             Ter(tecNO_PERMISSION));
     }
@@ -240,7 +250,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         env.fund(XRP(1000), carol);
         env.close();
         auto const id = setup(env, 400);
-        env(clawbackJV(alice, carol, id, 400, issuerSk.x, zero),
+        env(clawbackJV(env, alice, carol, id, 400, issuerSk.x, zero),
             Ter(tecOBJECT_NOT_FOUND));
     }
 
@@ -252,7 +262,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
-        env(clawbackJV(alice, bob, mpt.issuanceID(), 100, issuerSk.x, zero),
+        env(clawbackJV(env, alice, bob, mpt.issuanceID(), 100, issuerSk.x, zero),
             Ter(tecNO_PERMISSION));
     }
 
@@ -260,7 +270,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
     {
         Env env{*this, features};
         auto const id = setup(env, 400);
-        env(clawbackJV(alice, bob, id, 500, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance)),
+        env(clawbackJV(env, alice, bob, id, 500, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance)),
             Ter(tecINSUFFICIENT_FUNDS));
     }
 
@@ -288,7 +298,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
                 return true;
             });
         env(clawbackJV(
-                alice, bob, id, 400, issuerSk.x,
+                env, alice, bob, id, 400, issuerSk.x,
                 readCt(env, id, bob, sfIssuerEncryptedBalance)),
             Ter(tecINSUFFICIENT_FUNDS));
     }
@@ -298,7 +308,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env, 400);
         auto jv = clawbackJV(
-            alice, bob, id, 400, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance));
+            env, alice, bob, id, 400, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance));
         auto proof = *strUnHex(jv[sfZKProof].asString());
         proof[0] ^= 0x01;
         jv[sfZKProof] = strHex(proof);
@@ -311,7 +321,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env, 400);
         auto jv = clawbackJV(
-            alice, bob, id, 400, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance));
+            env, alice, bob, id, 400, issuerSk.x, readCt(env, id, bob, sfIssuerEncryptedBalance));
         jv[sfMPTAmount] = std::to_string(399);  // mismatch
         env(jv, Ter(tecBAD_PROOF));
     }
@@ -326,7 +336,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         auto const before = env.le(keylet::mptoken(id, bob.id()))
                                 ->getFieldU32(sfConfidentialBalanceVersion);
         env(clawbackJV(
-            alice, bob, id, 400, issuerSk.x,
+            env, alice, bob, id, 400, issuerSk.x,
             readCt(env, id, bob, sfIssuerEncryptedBalance)));
         env.close();
 
@@ -348,7 +358,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
         auto const id = setup(env, 400, auditorPub);
         env(clawbackJV(
-            alice, bob, id, 400, issuerSk.x,
+            env, alice, bob, id, 400, issuerSk.x,
             readCt(env, id, bob, sfIssuerEncryptedBalance)));
         env.close();
         auto const tok = env.le(keylet::mptoken(id, bob.id()));

@@ -46,12 +46,8 @@ ConfidentialMPTClawback::preflight(PreflightContext const& ctx)
     if (ctx.tx[sfHolder] == ctx.tx[sfAccount])
         return temMALFORMED;
 
-    if (ctx.tx[sfBlindingFactor].size() != cmpt::kScalarSize)
-        return temMALFORMED;
-
-    // The ZKProof carries exactly one linkage proof binding the issuer mirror to
-    // the disclosed amount.
-    if (ctx.tx[sfZKProof].size() != cmpt::LinkageProof::serializedSize())
+    // The ZKProof carries exactly one compact clawback proof (64 B).
+    if (ctx.tx[sfZKProof].size() != cmpt::CompactClawbackProof::serializedSize())
         return temMALFORMED;
 
     // The clawed-back amount is the holder's entire confidential balance; it is
@@ -114,15 +110,12 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
 
     // The issuer proves, through knowledge of its secret key, that the issuer
     // mirror (the holder's full balance encrypted under the issuer key) encrypts
-    // exactly the disclosed amount: the linkage proof binds that ciphertext to a
-    // Pedersen commitment the verifier reconstructs from the public amount and
-    // the disclosed blinding factor.
-    cmpt::Scalar const blind{ctx.tx[sfBlindingFactor]};
-    auto const commitment = cmpt::PedersenCommitment::commit(amount, blind);
+    // exactly the disclosed amount. Compact clawback proof verifies:
+    //   P_iss = sk_iss*G  and  C2 - m*G = sk_iss*C1.
     auto const issuerMirror = loadCt(*sleToken, sfIssuerEncryptedBalance);
 
-    auto const proof = cmpt::LinkageProof::deserialize(ctx.tx[sfZKProof]);
-    if (!proof || !proof->verify(*issuerKey, issuerMirror, commitment))
+    auto const proof = cmpt::CompactClawbackProof::deserialize(ctx.tx[sfZKProof]);
+    if (!proof || !proof->verify(amount, *issuerKey, issuerMirror))
         return tecBAD_PROOF;
 
     return tesSUCCESS;

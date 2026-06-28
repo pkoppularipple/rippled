@@ -1,0 +1,1 @@
+# mpt-crypto vendored at commit 8ac279d6df0d6c387ca6b1f4a47fdf5df4cfa9c9 from https://github.com/XRPLF/mpt-crypto

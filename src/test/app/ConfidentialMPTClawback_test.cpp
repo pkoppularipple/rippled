@@ -88,9 +88,9 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
     }
 
     // Build a ConfidentialMPTClawback JSON. The clawed-back amount is public; the
-    // ZKProof is a single linkage proof binding the holder's issuer mirror to a
-    // commitment the verifier reconstructs from the amount and blinding factor,
-    // proving the mirror encrypts exactly that amount through the issuer's key.
+    // ZKProof is a compact clawback sigma proof (64 bytes) proving the issuer's
+    // mirror ciphertext decrypts to exactly the disclosed amount through the
+    // issuer's secret key.
     static json::Value
     clawbackJV(
         jtx::Account const& issuer,
@@ -101,10 +101,9 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
         cmpt::ElGamalCiphertext const& issuerMirror)
     {
         using namespace cmpt;
-        Scalar const r = Scalar::random();
-        auto const commitment = PedersenCommitment::commit(amount, r);
+        auto const issuerPub = ECPoint::mulBase(issuerSecret);
         auto const proof =
-            LinkageProof::prove(issuerSecret, amount, r, issuerMirror, commitment);
+            CompactClawbackProof::prove(issuerSecret, amount, issuerPub, issuerMirror);
 
         json::Value jv;
         jv[jss::TransactionType] = "ConfidentialMPTClawback";
@@ -112,7 +111,6 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
         jv[sfHolder] = holder.human();
         jv[sfMPTokenIssuanceID] = to_string(id);
         jv[sfMPTAmount] = std::to_string(amount);
-        jv[sfBlindingFactor] = hexOf(r.bytes());
         jv[sfZKProof] = hexOf(proof.serialize());
         return jv;
     }

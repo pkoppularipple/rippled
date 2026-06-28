@@ -1,6 +1,9 @@
 #include <xrpl/protocol/ConfidentialMPT.h>
 
 #include <xrpl/basics/contract.h>
+#include <xrpl/protocol/digest.h>
+
+#include <secp256k1_mpt.h>
 
 #include <algorithm>
 #include <array>
@@ -10,6 +13,12 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+// Verify mpt-crypto linkage: compact proof sizes match our stubs.
+static_assert(SECP256K1_POK_SK_PROOF_SIZE == 64);
+static_assert(SECP256K1_COMPACT_STANDARD_PROOF_SIZE == 192);
+static_assert(SECP256K1_COMPACT_CLAWBACK_PROOF_SIZE == 64);
+static_assert(SECP256K1_COMPACT_CONVERTBACK_PROOF_SIZE == 128);
 
 namespace xrpl {
 namespace cmpt {
@@ -1023,6 +1032,334 @@ PlaintextEqualityProof::deserialize(Slice const& in)
     Scalar const z1{Slice{in.data() + 2 * kScalarSize, kScalarSize}};
     Scalar const z2{Slice{in.data() + 3 * kScalarSize, kScalarSize}};
     return PlaintextEqualityProof{e, zm, z1, z2};
+}
+
+//------------------------------------------------------------------------------
+// CompactClawbackProof (mpt-crypto proof_compact_clawback.c)
+//------------------------------------------------------------------------------
+
+namespace {
+
+// SHA-256 Fiat-Shamir challenge for the compact AND-composed sigma proofs,
+// matching mpt-crypto byte-for-byte: e = reduce32(SHA256(domain || parts ||
+// context_id)). The reference hashes with SHA-256 (not SHA-512 like the
+// generic hashToScalar), so byte-for-byte interop requires SHA-256 here. The
+// 32-byte contextId is appended only when non-empty (the reference's optional
+// context_id; an empty Slice matches a NULL context_id and appends nothing).
+Scalar
+compactChallenge(
+    Slice const& domain,
+    std::vector<Slice> const& parts,
+    Slice const& contextId)
+{
+    OpensslSha256Hasher h;
+    h(domain.data(), domain.size());
+    for (auto const& p : parts)
+        h(p.data(), p.size());
+    if (contextId.size())
+        h(contextId.data(), contextId.size());
+    auto const digest = OpensslSha256Hasher::result_type(h);
+    return Scalar(Slice{digest.data(), digest.size()});
+}
+
+Slice
+domainClawback()
+{
+    return lit("CMPT_CLAWBACK_SIGMA");
+}
+
+}  // namespace
+
+CompactClawbackProof
+CompactClawbackProof::prove(
+    Scalar const& secret,
+    std::uint64_t amount,
+    ElGamalPublicKey const& pub,
+    ElGamalCiphertext const& issuerMirror,
+    Slice const& contextId)
+{
+    if (secret.isZero() || pub.isInfinity())
+        Throw<std::runtime_error>(
+            "CompactClawbackProof::prove: identity/zero public key");
+
+    // Witness randomness for Fiat-Shamir.
+    Scalar const w = Scalar::random();
+
+    // Commitment points T1, T2.
+    ECPoint const T1 = ECPoint::mulBase(w);  // w*G
+    ECPoint const mG = ECPoint::mulBase(Scalar(amount));
+    ECPoint const diff = issuerMirror.c2() - mG;  // C2 - m*G
+    ECPoint const T2 = ECPoint::mul(w, issuerMirror.c1());  // w*C1
+
+    // Fiat-Shamir challenge e = H(domain || P_iss || C1 || C2 || m*G || T1 || T2).
+    auto const pb = pub.serialize();
+    auto const c1b = issuerMirror.c1().serialize();
+    auto const c2b = issuerMirror.c2().serialize();
+    auto const mgb = mG.serialize();
+    auto const t1b = T1.serialize();
+    auto const t2b = T2.serialize();
+    Scalar const e = compactChallenge(
+        domainClawback(),
+        {Slice{pb.data(), pb.size()},
+         Slice{c1b.data(), c1b.size()},
+         Slice{c2b.data(), c2b.size()},
+         Slice{mgb.data(), mgb.size()},
+         Slice{t1b.data(), t1b.size()},
+         Slice{t2b.data(), t2b.size()}},
+        contextId);
+
+    // Response: z_sk = w + e*secret.
+    Scalar const zsk = w + e * secret;
+    return CompactClawbackProof{e, zsk};
+}
+
+bool
+CompactClawbackProof::verify(
+    std::uint64_t amount,
+    ElGamalPublicKey const& pub,
+    ElGamalCiphertext const& issuerMirror,
+    Slice const& contextId) const
+{
+    if (pub.isInfinity())
+        return false;
+
+    // Reconstruct commitments:
+    // T1 = z_sk*G - e*P_iss
+    // T2 = z_sk*C1 - e*(C2 - m*G)
+    ECPoint const mG = ECPoint::mulBase(Scalar(amount));
+    ECPoint const diff = issuerMirror.c2() - mG;
+
+    ECPoint const T1 = ECPoint::mulBase(zsk_) - ECPoint::mul(e_, pub);
+    ECPoint const T2 =
+        ECPoint::mul(zsk_, issuerMirror.c1()) - ECPoint::mul(e_, diff);
+
+    // Recompute challenge.
+    auto const pb = pub.serialize();
+    auto const c1b = issuerMirror.c1().serialize();
+    auto const c2b = issuerMirror.c2().serialize();
+    auto const mgb = mG.serialize();
+    auto const t1b = T1.serialize();
+    auto const t2b = T2.serialize();
+    Scalar const e = compactChallenge(
+        domainClawback(),
+        {Slice{pb.data(), pb.size()},
+         Slice{c1b.data(), c1b.size()},
+         Slice{c2b.data(), c2b.size()},
+         Slice{mgb.data(), mgb.size()},
+         Slice{t1b.data(), t1b.size()},
+         Slice{t2b.data(), t2b.size()}},
+        contextId);
+    return e == e_;
+}
+
+std::array<std::uint8_t, CompactClawbackProof::kSize>
+CompactClawbackProof::serialize() const
+{
+    std::array<std::uint8_t, kSize> out{};
+    std::memcpy(out.data(), e_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + kScalarSize, zsk_.bytes().data(), kScalarSize);
+    return out;
+}
+
+std::optional<CompactClawbackProof>
+CompactClawbackProof::deserialize(Slice const& in)
+{
+    if (in.size() != kSize)
+        return std::nullopt;
+    Scalar const e{Slice{in.data(), kScalarSize}};
+    Scalar const zsk{Slice{in.data() + kScalarSize, kScalarSize}};
+    return CompactClawbackProof{e, zsk};
+}
+
+//------------------------------------------------------------------------------
+// CompactConvertBackProof (mpt-crypto proof_compact_convertback.c)
+//------------------------------------------------------------------------------
+
+namespace {
+
+Slice
+domainConvertBack()
+{
+    return lit("CMPT_CONVERTBACK_SIGMA");
+}
+
+}  // namespace
+
+CompactConvertBackProof
+CompactConvertBackProof::prove(
+    Scalar const& secret,
+    std::uint64_t balance,
+    Scalar const& rho,
+    ElGamalPublicKey const& pub,
+    ElGamalCiphertext const& postDebit,
+    PedersenCommitment const& balanceCommit,
+    Slice const& contextId)
+{
+    if (secret.isZero() || pub.isInfinity())
+        Throw<std::runtime_error>(
+            "CompactConvertBackProof::prove: identity/zero public key");
+
+    ECPoint const H = ECPoint::generatorH();
+    Scalar const b(balance);
+
+    // Witness randomness for Fiat-Shamir.
+    Scalar const w_sk = Scalar::random();
+    Scalar const w_b = Scalar::random();
+    Scalar const w_rho = Scalar::random();
+
+    // Commitments:
+    // T_sk1 = w_sk*G
+    // T_sk2 = w_b*G + w_sk*B1
+    // T_b   = w_b*G + w_rho*H
+    ECPoint const T_sk1 = ECPoint::mulBase(w_sk);
+    ECPoint const T_sk2 =
+        ECPoint::mulBase(w_b) + ECPoint::mul(w_sk, postDebit.c1());
+    ECPoint const T_b = ECPoint::mulBase(w_b) + ECPoint::mul(w_rho, H);
+
+    // Fiat-Shamir challenge e = H(domain || P_A || B1 || B2 || PC_b || T_sk1 || T_sk2 || T_b).
+    auto const pkb = pub.serialize();
+    auto const b1b = postDebit.c1().serialize();
+    auto const b2b = postDebit.c2().serialize();
+    auto const pcb = balanceCommit.serialize();
+    auto const t1b = T_sk1.serialize();
+    auto const t2b = T_sk2.serialize();
+    auto const tbb = T_b.serialize();
+    Scalar const e = compactChallenge(
+        domainConvertBack(),
+        {Slice{pkb.data(), pkb.size()},
+         Slice{b1b.data(), b1b.size()},
+         Slice{b2b.data(), b2b.size()},
+         Slice{pcb.data(), pcb.size()},
+         Slice{t1b.data(), t1b.size()},
+         Slice{t2b.data(), t2b.size()},
+         Slice{tbb.data(), tbb.size()}},
+        contextId);
+
+    // Responses:
+    // z_sk  = w_sk  + e*secret
+    // z_b   = w_b   + e*balance
+    // z_rho = w_rho + e*rho
+    Scalar const z_sk = w_sk + e * secret;
+    Scalar const z_b = w_b + e * b;
+    Scalar const z_rho = w_rho + e * rho;
+    return CompactConvertBackProof{e, z_b, z_rho, z_sk};
+}
+
+bool
+CompactConvertBackProof::verify(
+    ElGamalPublicKey const& pub,
+    ElGamalCiphertext const& postDebit,
+    PedersenCommitment const& balanceCommit,
+    Slice const& contextId) const
+{
+    if (pub.isInfinity())
+        return false;
+
+    ECPoint const H = ECPoint::generatorH();
+
+    // Reconstruct commitments:
+    // T_sk1 = z_sk*G - e*P_A
+    // T_sk2 = z_b*G + z_sk*B1 - e*B2
+    // T_b   = z_b*G + z_rho*H - e*PC_b
+    ECPoint const T_sk1 = ECPoint::mulBase(zsk_) - ECPoint::mul(e_, pub);
+    ECPoint const T_sk2 = ECPoint::mulBase(zb_) +
+        ECPoint::mul(zsk_, postDebit.c1()) - ECPoint::mul(e_, postDebit.c2());
+    ECPoint const T_b = ECPoint::mulBase(zb_) + ECPoint::mul(zrho_, H) -
+        ECPoint::mul(e_, balanceCommit.point());
+
+    // Recompute challenge.
+    auto const pkb = pub.serialize();
+    auto const b1b = postDebit.c1().serialize();
+    auto const b2b = postDebit.c2().serialize();
+    auto const pcb = balanceCommit.serialize();
+    auto const t1b = T_sk1.serialize();
+    auto const t2b = T_sk2.serialize();
+    auto const tbb = T_b.serialize();
+    Scalar const e = compactChallenge(
+        domainConvertBack(),
+        {Slice{pkb.data(), pkb.size()},
+         Slice{b1b.data(), b1b.size()},
+         Slice{b2b.data(), b2b.size()},
+         Slice{pcb.data(), pcb.size()},
+         Slice{t1b.data(), t1b.size()},
+         Slice{t2b.data(), t2b.size()},
+         Slice{tbb.data(), tbb.size()}},
+        contextId);
+    return e == e_;
+}
+
+std::array<std::uint8_t, CompactConvertBackProof::kSize>
+CompactConvertBackProof::serialize() const
+{
+    std::array<std::uint8_t, kSize> out{};
+    std::memcpy(out.data(), e_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + kScalarSize, zb_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 2 * kScalarSize, zrho_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 3 * kScalarSize, zsk_.bytes().data(), kScalarSize);
+    return out;
+}
+
+std::optional<CompactConvertBackProof>
+CompactConvertBackProof::deserialize(Slice const& in)
+{
+    if (in.size() != kSize)
+        return std::nullopt;
+    Scalar const e{Slice{in.data(), kScalarSize}};
+    Scalar const zb{Slice{in.data() + kScalarSize, kScalarSize}};
+    Scalar const zrho{Slice{in.data() + 2 * kScalarSize, kScalarSize}};
+    Scalar const zsk{Slice{in.data() + 3 * kScalarSize, kScalarSize}};
+    return CompactConvertBackProof{e, zb, zrho, zsk};
+}
+
+//------------------------------------------------------------------------------
+// CompactStandardProof (stub for XLS-0096 Phase 1)
+//------------------------------------------------------------------------------
+
+// TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
+CompactStandardProof
+CompactStandardProof::prove(
+    Scalar const&,
+    std::uint64_t,
+    std::uint64_t,
+    Scalar const&,
+    Scalar const&,
+    Scalar const&,
+    ElGamalPublicKey const&,
+    ElGamalCiphertext const&,
+    ElGamalCiphertext const&,
+    PedersenCommitment const&,
+    PedersenCommitment const&)
+{
+    return CompactStandardProof{};
+}
+
+// TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
+bool
+CompactStandardProof::verify(
+    ElGamalPublicKey const&,
+    ElGamalPublicKey const&,
+    ElGamalCiphertext const&,
+    ElGamalCiphertext const&,
+    PedersenCommitment const&,
+    PedersenCommitment const&) const
+{
+    return false;
+}
+
+std::array<std::uint8_t, CompactStandardProof::kSize>
+CompactStandardProof::serialize() const
+{
+    return data_;
+}
+
+std::optional<CompactStandardProof>
+CompactStandardProof::deserialize(Slice const& in)
+{
+    if (in.size() != kSize)
+        return std::nullopt;
+    CompactStandardProof proof;
+    std::memcpy(proof.data_.data(), in.data(), kSize);
+    return proof;
 }
 
 }  // namespace cmpt

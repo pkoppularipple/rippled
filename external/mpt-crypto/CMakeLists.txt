@@ -1,0 +1,63 @@
+cmake_minimum_required(VERSION 3.16)
+project(mpt-crypto C CXX)
+
+# --- Find Dependencies ---
+find_package(OpenSSL REQUIRED)
+find_package(secp256k1 REQUIRED)
+
+# --- Add common options ---
+# -Werror is on by default for our own builds/CI, but consumers (e.g. rippled
+# via Conan) can disable it: third-party toolchains may inject flags that emit
+# warnings outside our control (e.g. -Wunused-command-line-argument).
+option(MPT_CRYPTO_WERROR "Treat compiler warnings as errors" ON)
+add_library(mpt_crypto_common INTERFACE)
+if(NOT MSVC)
+    target_compile_options(mpt_crypto_common INTERFACE -Wall -Wextra -Wpedantic)
+    if(MPT_CRYPTO_WERROR)
+        target_compile_options(mpt_crypto_common INTERFACE -Werror)
+    endif()
+endif()
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# --- Define The Library ---
+add_library(
+    mpt-crypto
+    src/bulletproof_aggregated.c
+    src/commitments.c
+    src/elgamal.c
+    src/mpt_scalar.c
+    src/proof_pok_sk.c
+    src/proof_compact_standard.c
+    src/proof_compact_clawback.c
+    src/proof_compact_convertback.c
+    src/utility/mpt_utility.cpp
+)
+
+# --- Set Include Directories ---
+target_include_directories(mpt-crypto PUBLIC include)
+
+# --- Link Common Options ---
+target_link_libraries(mpt-crypto PUBLIC mpt_crypto_common)
+
+# --- Set Compile Definitions ---
+include(CheckTypeSize)
+# Check if the compiler supports __int128 (required for the optimized 64-bit code)
+check_type_size("__int128" HAVE___INT128)
+
+if(HAVE___INT128)
+    message(STATUS "Build: Detected 128-bit integer support.")
+    target_compile_definitions(mpt-crypto PRIVATE SECP256K1_WIDEMUL_INT128)
+else()
+    message(STATUS "Build: No 128-bit support detected.")
+    target_compile_definitions(mpt-crypto PRIVATE SECP256K1_WIDEMUL_INT64)
+endif()
+
+# --- Link Dependencies ---
+target_link_libraries(mpt-crypto PUBLIC secp256k1::secp256k1 OpenSSL::Crypto)
+
+# --- Testing ---
+option(ENABLE_TESTS "Enable building tests" ON)
+if(ENABLE_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
+endif()

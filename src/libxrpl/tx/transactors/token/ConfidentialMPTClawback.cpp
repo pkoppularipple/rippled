@@ -114,8 +114,19 @@ ConfidentialMPTClawback::preclaim(PreclaimContext const& ctx)
     //   P_iss = sk_iss*G  and  C2 - m*G = sk_iss*C1.
     auto const issuerMirror = loadCt(*sleToken, sfIssuerEncryptedBalance);
 
+    // Bind the proof to this transaction for replay/domain separation: the
+    // context_id commits to the issuer, issuance, transaction sequence, and the
+    // targeted holder, matching the reference mpt-crypto clawback preimage.
+    auto const contextId = cmpt::clawbackContextId(
+        ctx.tx[sfAccount], id, ctx.tx[sfSequence], ctx.tx[sfHolder]);
+
     auto const proof = cmpt::CompactClawbackProof::deserialize(ctx.tx[sfZKProof]);
-    if (!proof || !proof->verify(amount, *issuerKey, issuerMirror))
+    if (!proof ||
+        !proof->verify(
+            amount,
+            *issuerKey,
+            issuerMirror,
+            Slice{contextId.data(), contextId.size()}))
         return tecBAD_PROOF;
 
     return tesSUCCESS;

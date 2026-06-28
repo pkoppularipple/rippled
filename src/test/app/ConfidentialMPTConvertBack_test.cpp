@@ -89,6 +89,7 @@ class ConfidentialMPTConvertBack_test : public beast::unit_test::Suite
     // proof (688 B, implicit 63-bit width).
     static json::Value
     convertBackJV(
+        jtx::Env& env,
         jtx::Account const& account,
         MPTID const& id,
         std::uint64_t amount,
@@ -107,8 +108,24 @@ class ConfidentialMPTConvertBack_test : public beast::unit_test::Suite
         auto const postDebit = spending - holderCt;
         Scalar const rb = Scalar::random();
         auto const [rangeBalance, balanceCommit] = RangeProof::prove(remaining, rb, 63);
+        // Bind the proof to the transaction the holder is about to submit; the
+        // verifier recomputes the same context from the tx account, sequence,
+        // and the pre-transaction confidential balance version. env.seq(account)
+        // equals the sequence jtx will autofill; an absent MPToken means ver 0.
+        std::uint32_t version = 0;
+        if (auto const sle = env.le(keylet::mptoken(id, account.id()));
+            sle && sle->isFieldPresent(sfConfidentialBalanceVersion))
+            version = sle->getFieldU32(sfConfidentialBalanceVersion);
+        auto const contextId =
+            convertBackContextId(account.id(), id, env.seq(account), version);
         auto const compactBalance = CompactConvertBackProof::prove(
-            holderSecret, remaining, rb, holderPub, postDebit, balanceCommit);
+            holderSecret,
+            remaining,
+            rb,
+            holderPub,
+            postDebit,
+            balanceCommit,
+            Slice{contextId.data(), contextId.size()});
 
         Blob bundle;
         auto append = [&](auto const& a) {
@@ -194,7 +211,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         mpt.create({.flags = tfMPTCanTransfer});
         mpt.authorize({.account = bob});
         env(convertBackJV(
-                bob, mpt.issuanceID(), 1, 0, bobSk.x, bobPub, issuerPub,
+                env, bob, mpt.issuanceID(), 1, 0, bobSk.x, bobPub, issuerPub,
                 cmpt::ElGamalCiphertext::encryptZero()),
             Ter(temDISABLED));
     }
@@ -206,7 +223,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
         mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
         env(convertBackJV(
-                alice, mpt.issuanceID(), 1, 0, bobSk.x, bobPub, issuerPub,
+                env, alice, mpt.issuanceID(), 1, 0, bobSk.x, bobPub, issuerPub,
                 cmpt::ElGamalCiphertext::encryptZero()),
             Ter(temMALFORMED));
     }
@@ -216,7 +233,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env, 400);
         env(convertBackJV(
-                bob, id, 0, 400, bobSk.x, bobPub, issuerPub,
+                env, bob, id, 0, 400, bobSk.x, bobPub, issuerPub,
                 readSpending(env, id, bob)),
             Ter(temBAD_AMOUNT));
     }
@@ -230,7 +247,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
         env(convertBackJV(
-                bob, mpt.issuanceID(), 100, 0, bobSk.x, bobPub, issuerPub,
+                env, bob, mpt.issuanceID(), 100, 0, bobSk.x, bobPub, issuerPub,
                 cmpt::ElGamalCiphertext::encryptZero()),
             Ter(tecNO_PERMISSION));
     }
@@ -244,7 +261,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         auto const before = env.le(keylet::mptoken(id, bob.id()))
                                 ->getFieldU32(sfConfidentialBalanceVersion);
         env(convertBackJV(
-            bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
+            env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
             readSpending(env, id, bob)));
         env.close();
 
@@ -263,7 +280,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env, 400);
         env(convertBackJV(
-                bob, id, 500, 0, bobSk.x, bobPub, issuerPub,
+                env, bob, id, 500, 0, bobSk.x, bobPub, issuerPub,
                 readSpending(env, id, bob)),
             Ter(tecINSUFFICIENT_FUNDS));
     }
@@ -273,7 +290,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env, 400);
         auto jv = convertBackJV(
-            bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
+            env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
             readSpending(env, id, bob));
         auto proof = *strUnHex(jv[sfZKProof].asString());
         proof[0] ^= 0x01;
@@ -287,7 +304,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env, 400);
         auto jv = convertBackJV(
-            bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
+            env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
             readSpending(env, id, bob));
         jv[sfMPTAmount] = std::to_string(151);  // mismatch
         env(jv, Ter(tecBAD_PROOF));
@@ -300,7 +317,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
         auto const id = setup(env, 400, auditorPub);
         env(convertBackJV(
-            bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
+            env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
             readSpending(env, id, bob), auditorPub));
         env.close();
         auto const tok = env.le(keylet::mptoken(id, bob.id()));
@@ -314,7 +331,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
         auto const id = setup(env, 400, auditorPub);
         env(convertBackJV(
-                bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
+                env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
                 readSpending(env, id, bob)),
             Ter(tecNO_PERMISSION));
     }
@@ -326,7 +343,7 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
         auto const id = setup(env, 400);
         auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
         env(convertBackJV(
-                bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
+                env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
                 readSpending(env, id, bob), auditorPub),
             Ter(tecNO_PERMISSION));
     }

@@ -99,15 +99,19 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
         MPTID const& id,
         std::uint64_t amount,
         cmpt::Scalar const& issuerSecret,
-        cmpt::ElGamalCiphertext const& issuerMirror)
+        cmpt::ElGamalCiphertext const& issuerMirror,
+        std::optional<std::uint32_t> seqOverride = std::nullopt)
     {
         using namespace cmpt;
         auto const issuerPub = ECPoint::mulBase(issuerSecret);
         // Bind the proof to the transaction the issuer is about to submit; the
-        // verifier recomputes the same context from the tx account, sequence,
-        // and holder. env.seq(issuer) equals the sequence jtx will autofill.
+        // verifier recomputes the same context from the tx account, the
+        // SeqProxy value, and the holder. For a sequence-based transaction
+        // env.seq(issuer) equals the sequence jtx will autofill; for a ticketed
+        // transaction seqOverride carries the ticket number (getSeqValue()).
+        auto const seqValue = seqOverride.value_or(env.seq(issuer));
         auto const contextId =
-            clawbackContextId(issuer.id(), id, env.seq(issuer), holder.id());
+            clawbackContextId(issuer.id(), id, seqValue, holder.id());
         auto const proof = CompactClawbackProof::prove(
             issuerSecret,
             amount,
@@ -364,6 +368,39 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         auto const tok = env.le(keylet::mptoken(id, bob.id()));
         BEAST_EXPECT(tok && tok->isFieldPresent(sfAuditorEncryptedBalance));
         BEAST_EXPECT(readCt(env, id, bob, sfAuditorEncryptedBalance) == zero);
+    }
+
+    // Ticketed clawback exercises the SeqProxy binding. A ticketed
+    // transaction carries sfSequence == 0, so a proof bound to sequence 0
+    // (the raw sfSequence) is rejected: the verifier binds the context to
+    // getSeqValue(), which returns the ticket number. A proof bound to the
+    // ticket number is accepted.
+    {
+        Env env{*this, features};
+        auto const id = setup(env, 400);
+
+        std::uint32_t const ticketSeq = env.seq(alice) + 1;
+        env(ticket::create(alice, 2));
+        env.close();
+
+        // Bound to sequence 0 (the literal sfSequence of a ticketed tx) is
+        // rejected.
+        env(clawbackJV(
+                env, alice, bob, id, 400, issuerSk.x,
+                readCt(env, id, bob, sfIssuerEncryptedBalance), 0u),
+            ticket::Use(ticketSeq),
+            Ter(tecBAD_PROOF));
+
+        // Bound to the ticket number (getSeqValue()) is accepted.
+        env(clawbackJV(
+                env, alice, bob, id, 400, issuerSk.x,
+                readCt(env, id, bob, sfIssuerEncryptedBalance), ticketSeq + 1),
+            ticket::Use(ticketSeq + 1));
+        env.close();
+
+        auto const tok = env.le(keylet::mptoken(id, bob.id()));
+        BEAST_EXPECT(tok && tok->getFieldU64(sfMPTAmount) == 600);
+        BEAST_EXPECT(readCt(env, id, bob, sfIssuerEncryptedBalance) == zero);
     }
 }
 

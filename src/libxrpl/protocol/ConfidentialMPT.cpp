@@ -413,7 +413,11 @@ RangeProof::serializedSize(std::uint8_t bits)
 }
 
 std::pair<RangeProof, PedersenCommitment>
-RangeProof::prove(std::uint64_t value, Scalar const& blind, std::uint8_t bits)
+RangeProof::prove(
+    std::uint64_t value,
+    Scalar const& blind,
+    std::uint8_t bits,
+    Slice const& contextId)
 {
     if (bits == 0 || bits > kMaxBits)
         Throw<std::runtime_error>("RangeProof::prove: invalid bit width");
@@ -454,11 +458,15 @@ RangeProof::prove(std::uint64_t value, Scalar const& blind, std::uint8_t bits)
     proof.a_ = msm(aL, gen.g) + msm(aR, gen.h) + ECPoint::mul(alpha, H);
     proof.s_ = msm(sL, gen.g) + msm(sR, gen.h) + ECPoint::mul(rho, H);
 
-    // Transcript: commitment || A || S  ->  challenges y, z.
+    // Transcript: commitment || A || S [|| context_id]  ->  challenges y, z.
+    // The context_id is folded in before the first challenge, so it binds
+    // every subsequent challenge (y, z, x, w, and the IPA rounds).
     std::vector<std::uint8_t> t;
     absorb(t, commitment.point());
     absorb(t, proof.a_);
     absorb(t, proof.s_);
+    if (contextId.size())
+        t.insert(t.end(), contextId.data(), contextId.data() + contextId.size());
     Slice const tSlice0{t.data(), t.size()};
     Scalar const y = hashToScalar(rpDomain(), {tSlice0, lit("y")});
     Scalar const z = hashToScalar(rpDomain(), {tSlice0, lit("z")});
@@ -590,7 +598,8 @@ RangeProof::prove(std::uint64_t value, Scalar const& blind, std::uint8_t bits)
 }
 
 bool
-RangeProof::verify(PedersenCommitment const& commitment) const
+RangeProof::verify(PedersenCommitment const& commitment, Slice const& contextId)
+    const
 {
     if (bits_ == 0 || bits_ > kMaxBits)
         return false;
@@ -602,11 +611,14 @@ RangeProof::verify(PedersenCommitment const& commitment) const
     ECPoint const H = ECPoint::generatorH();
     Scalar const one(std::uint64_t{1});
 
-    // Recompute challenges y, z, x, w from the transcript.
+    // Recompute challenges y, z, x, w from the transcript. The context_id is
+    // folded in before the first challenge, mirroring prove().
     std::vector<std::uint8_t> t;
     absorb(t, commitment.point());
     absorb(t, a_);
     absorb(t, s_);
+    if (contextId.size())
+        t.insert(t.end(), contextId.data(), contextId.data() + contextId.size());
     Slice const tSlice0{t.data(), t.size()};
     Scalar const y = hashToScalar(rpDomain(), {tSlice0, lit("y")});
     Scalar const z = hashToScalar(rpDomain(), {tSlice0, lit("z")});
@@ -833,7 +845,8 @@ LinkageProof::prove(
     std::uint64_t value,
     Scalar const& blind,
     ElGamalCiphertext const& ct,
-    PedersenCommitment const& commitment)
+    PedersenCommitment const& commitment,
+    Slice const& contextId)
 {
     ECPoint const H = ECPoint::generatorH();
     ECPoint const Y = ECPoint::mulBase(secret);
@@ -854,15 +867,17 @@ LinkageProof::prove(
     auto const t1b = t1.serialize();
     auto const t2b = t2.serialize();
     auto const t3b = t3.serialize();
-    Scalar const e = hashToScalar(
-        lit("XLS96-MPT/link/v1"),
-        {Slice{yb.data(), yb.size()},
-         Slice{c1b.data(), c1b.size()},
-         Slice{c2b.data(), c2b.size()},
-         Slice{pb.data(), pb.size()},
-         Slice{t1b.data(), t1b.size()},
-         Slice{t2b.data(), t2b.size()},
-         Slice{t3b.data(), t3b.size()}});
+    std::vector<Slice> parts{
+        Slice{yb.data(), yb.size()},
+        Slice{c1b.data(), c1b.size()},
+        Slice{c2b.data(), c2b.size()},
+        Slice{pb.data(), pb.size()},
+        Slice{t1b.data(), t1b.size()},
+        Slice{t2b.data(), t2b.size()},
+        Slice{t3b.data(), t3b.size()}};
+    if (contextId.size())
+        parts.push_back(contextId);
+    Scalar const e = hashToScalar(lit("XLS96-MPT/link/v1"), parts);
 
     Scalar const zx = a + e * secret;
     Scalar const zm = b + e * m;
@@ -874,7 +889,8 @@ bool
 LinkageProof::verify(
     ElGamalPublicKey const& pub,
     ElGamalCiphertext const& ct,
-    PedersenCommitment const& commitment) const
+    PedersenCommitment const& commitment,
+    Slice const& contextId) const
 {
     // Reject the identity public key: with Y at infinity the e*Y term vanishes
     // and a proof for the zero secret could otherwise verify.
@@ -896,15 +912,17 @@ LinkageProof::verify(
     auto const t1b = t1.serialize();
     auto const t2b = t2.serialize();
     auto const t3b = t3.serialize();
-    Scalar const e = hashToScalar(
-        lit("XLS96-MPT/link/v1"),
-        {Slice{yb.data(), yb.size()},
-         Slice{c1b.data(), c1b.size()},
-         Slice{c2b.data(), c2b.size()},
-         Slice{pb.data(), pb.size()},
-         Slice{t1b.data(), t1b.size()},
-         Slice{t2b.data(), t2b.size()},
-         Slice{t3b.data(), t3b.size()}});
+    std::vector<Slice> parts{
+        Slice{yb.data(), yb.size()},
+        Slice{c1b.data(), c1b.size()},
+        Slice{c2b.data(), c2b.size()},
+        Slice{pb.data(), pb.size()},
+        Slice{t1b.data(), t1b.size()},
+        Slice{t2b.data(), t2b.size()},
+        Slice{t3b.data(), t3b.size()}};
+    if (contextId.size())
+        parts.push_back(contextId);
+    Scalar const e = hashToScalar(lit("XLS96-MPT/link/v1"), parts);
     return e == e_;
 }
 
@@ -943,7 +961,8 @@ PlaintextEqualityProof::prove(
     Scalar const& k1,
     Scalar const& k2,
     ElGamalCiphertext const& ct1,
-    ElGamalCiphertext const& ct2)
+    ElGamalCiphertext const& ct2,
+    Slice const& contextId)
 {
     Scalar const m(value);
 
@@ -966,18 +985,20 @@ PlaintextEqualityProof::prove(
     auto const a2b = a2.serialize();
     auto const b1b = b1.serialize();
     auto const b2b = b2.serialize();
-    Scalar const e = hashToScalar(
-        lit("XLS96-MPT/pteq/v1"),
-        {Slice{y1b.data(), y1b.size()},
-         Slice{y2b.data(), y2b.size()},
-         Slice{c1a.data(), c1a.size()},
-         Slice{c1b.data(), c1b.size()},
-         Slice{c2a.data(), c2a.size()},
-         Slice{c2b.data(), c2b.size()},
-         Slice{a1b.data(), a1b.size()},
-         Slice{a2b.data(), a2b.size()},
-         Slice{b1b.data(), b1b.size()},
-         Slice{b2b.data(), b2b.size()}});
+    std::vector<Slice> parts{
+        Slice{y1b.data(), y1b.size()},
+        Slice{y2b.data(), y2b.size()},
+        Slice{c1a.data(), c1a.size()},
+        Slice{c1b.data(), c1b.size()},
+        Slice{c2a.data(), c2a.size()},
+        Slice{c2b.data(), c2b.size()},
+        Slice{a1b.data(), a1b.size()},
+        Slice{a2b.data(), a2b.size()},
+        Slice{b1b.data(), b1b.size()},
+        Slice{b2b.data(), b2b.size()}};
+    if (contextId.size())
+        parts.push_back(contextId);
+    Scalar const e = hashToScalar(lit("XLS96-MPT/pteq/v1"), parts);
 
     Scalar const zm = wm + e * m;
     Scalar const z1 = w1 + e * k1;
@@ -990,7 +1011,8 @@ PlaintextEqualityProof::verify(
     ElGamalPublicKey const& pub1,
     ElGamalPublicKey const& pub2,
     ElGamalCiphertext const& ct1,
-    ElGamalCiphertext const& ct2) const
+    ElGamalCiphertext const& ct2,
+    Slice const& contextId) const
 {
     if (pub1.isInfinity() || pub2.isInfinity())
         return false;
@@ -1012,18 +1034,20 @@ PlaintextEqualityProof::verify(
     auto const a2b = a2.serialize();
     auto const b1b = b1.serialize();
     auto const b2b = b2.serialize();
-    Scalar const e = hashToScalar(
-        lit("XLS96-MPT/pteq/v1"),
-        {Slice{y1b.data(), y1b.size()},
-         Slice{y2b.data(), y2b.size()},
-         Slice{c1a.data(), c1a.size()},
-         Slice{c1b.data(), c1b.size()},
-         Slice{c2a.data(), c2a.size()},
-         Slice{c2b.data(), c2b.size()},
-         Slice{a1b.data(), a1b.size()},
-         Slice{a2b.data(), a2b.size()},
-         Slice{b1b.data(), b1b.size()},
-         Slice{b2b.data(), b2b.size()}});
+    std::vector<Slice> parts{
+        Slice{y1b.data(), y1b.size()},
+        Slice{y2b.data(), y2b.size()},
+        Slice{c1a.data(), c1a.size()},
+        Slice{c1b.data(), c1b.size()},
+        Slice{c2a.data(), c2a.size()},
+        Slice{c2b.data(), c2b.size()},
+        Slice{a1b.data(), a1b.size()},
+        Slice{a2b.data(), a2b.size()},
+        Slice{b1b.data(), b1b.size()},
+        Slice{b2b.data(), b2b.size()}};
+    if (contextId.size())
+        parts.push_back(contextId);
+    Scalar const e = hashToScalar(lit("XLS96-MPT/pteq/v1"), parts);
     return e == e_;
 }
 
@@ -1451,6 +1475,26 @@ convertContextId(
             sequence,
             out.data()) != 0)
         Throw<std::runtime_error>("convertContextId: derivation failed");
+    return out;
+}
+
+std::array<std::uint8_t, kContextIdSize>
+sendContextId(
+    AccountID const& account,
+    MPTID const& issuanceId,
+    std::uint32_t sequence,
+    AccountID const& dest,
+    std::uint32_t version)
+{
+    std::array<std::uint8_t, kContextIdSize> out{};
+    if (mpt_get_send_context_hash(
+            toAccountId(account),
+            toIssuanceId(issuanceId),
+            sequence,
+            toAccountId(dest),
+            version,
+            out.data()) != 0)
+        Throw<std::runtime_error>("sendContextId: derivation failed");
     return out;
 }
 

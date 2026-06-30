@@ -98,7 +98,8 @@ class ConfidentialMPTConvertBack_test : public beast::unit_test::Suite
         cmpt::ECPoint const& holderPub,
         cmpt::ECPoint const& issuerPub,
         cmpt::ElGamalCiphertext const& spending,
-        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt)
+        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt,
+        std::optional<std::uint32_t> seqOverride = std::nullopt)
     {
         using namespace cmpt;
         Scalar const k = Scalar::random();
@@ -109,15 +110,18 @@ class ConfidentialMPTConvertBack_test : public beast::unit_test::Suite
         Scalar const rb = Scalar::random();
         auto const [rangeBalance, balanceCommit] = RangeProof::prove(remaining, rb, 63);
         // Bind the proof to the transaction the holder is about to submit; the
-        // verifier recomputes the same context from the tx account, sequence,
-        // and the pre-transaction confidential balance version. env.seq(account)
-        // equals the sequence jtx will autofill; an absent MPToken means ver 0.
+        // verifier recomputes the same context from the tx account, the SeqProxy
+        // value, and the pre-transaction confidential balance version. For a
+        // sequence-based transaction env.seq(account) equals the sequence jtx
+        // will autofill; for a ticketed transaction seqOverride carries the
+        // ticket number (getSeqValue()). An absent MPToken means ver 0.
         std::uint32_t version = 0;
         if (auto const sle = env.le(keylet::mptoken(id, account.id()));
             sle && sle->isFieldPresent(sfConfidentialBalanceVersion))
             version = sle->getFieldU32(sfConfidentialBalanceVersion);
+        auto const seqValue = seqOverride.value_or(env.seq(account));
         auto const contextId =
-            convertBackContextId(account.id(), id, env.seq(account), version);
+            convertBackContextId(account.id(), id, seqValue, version);
         auto const compactBalance = CompactConvertBackProof::prove(
             holderSecret,
             remaining,
@@ -346,6 +350,39 @@ ConfidentialMPTConvertBack_test::testConvertBack(FeatureBitset features)
                 env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
                 readSpending(env, id, bob), auditorPub),
             Ter(tecNO_PERMISSION));
+    }
+
+    // Ticketed convert-back exercises the SeqProxy binding. A ticketed
+    // transaction carries sfSequence == 0, so a proof bound to sequence 0
+    // (the raw sfSequence) is rejected: the verifier binds the context to
+    // getSeqValue(), which returns the ticket number. A proof bound to the
+    // ticket number is accepted.
+    {
+        Env env{*this, features};
+        auto const id = setup(env, 400);
+
+        std::uint32_t const ticketSeq = env.seq(bob) + 1;
+        env(ticket::create(bob, 2));
+        env.close();
+
+        // Bound to sequence 0 (the literal sfSequence of a ticketed tx) is
+        // rejected.
+        env(convertBackJV(
+                env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
+                readSpending(env, id, bob), std::nullopt, 0u),
+            ticket::Use(ticketSeq),
+            Ter(tecBAD_PROOF));
+
+        // Bound to the ticket number (getSeqValue()) is accepted.
+        env(convertBackJV(
+                env, bob, id, 150, 250, bobSk.x, bobPub, issuerPub,
+                readSpending(env, id, bob), std::nullopt, ticketSeq + 1),
+            ticket::Use(ticketSeq + 1));
+        env.close();
+
+        auto const tok = env.le(keylet::mptoken(id, bob.id()));
+        BEAST_EXPECT(tok && tok->getFieldU64(sfMPTAmount) == 750);
+        BEAST_EXPECT(readSpending(env, id, bob).decrypt(bobSk.x, 2000) == 250);
     }
 }
 

@@ -175,7 +175,12 @@ private:
 /** Schnorr proof of knowledge of the secret key x for a public key Y = x*G.
 
     Used at registration to prove ownership of an encryption key and prevent
-    rogue-key attacks. Non-interactive via Fiat-Shamir.
+    rogue-key attacks. Non-interactive via Fiat-Shamir. The challenge is
+    reduce32(SHA256("CMPT_POK_SK_REGISTER" || Y || T || context_id)), matching
+    the reference mpt-crypto secp256k1_mpt_pok_sk_* byte-for-byte; an optional
+    32-byte context_id binds the proof to a single transaction. The two
+    implementations cross-verify bidirectionally but are NOT bit-reproducible
+    because the prover's nonce is independent randomness.
 */
 class SchnorrProof
 {
@@ -189,10 +194,13 @@ public:
     }
 
     static SchnorrProof
-    prove(Scalar const& secret, ElGamalPublicKey const& pub);
+    prove(
+        Scalar const& secret,
+        ElGamalPublicKey const& pub,
+        Slice const& contextId = {});
 
     [[nodiscard]] bool
-    verify(ElGamalPublicKey const& pub) const;
+    verify(ElGamalPublicKey const& pub, Slice const& contextId = {}) const;
 
     [[nodiscard]] std::array<std::uint8_t, kSize>
     serialize() const;
@@ -638,6 +646,15 @@ convertBackContextId(
     MPTID const& issuanceId,
     std::uint32_t sequence,
     std::uint32_t version);
+
+/// Convert (forward) context_id: binds the converting account and issuance to
+/// the transaction sequence at encryption-key registration. Mirrors
+/// mpt_get_convert_context_hash.
+[[nodiscard]] std::array<std::uint8_t, kContextIdSize>
+convertContextId(
+    AccountID const& account,
+    MPTID const& issuanceId,
+    std::uint32_t sequence);
 
 }  // namespace cmpt
 }  // namespace xrpl

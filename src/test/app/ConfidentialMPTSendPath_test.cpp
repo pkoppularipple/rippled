@@ -39,13 +39,15 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
     // assumed already present on the MPToken.
     static json::Value
     convertJV(
+        jtx::Env& env,
         jtx::Account const& account,
         MPTID const& id,
         std::uint64_t amount,
         cmpt::ECPoint const& holderPub,
         cmpt::ECPoint const& issuerPub,
         std::optional<cmpt::Scalar> const& holderSecret,
-        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt)
+        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt,
+        std::optional<std::uint32_t> seqOverride = std::nullopt)
     {
         cmpt::Scalar const k = cmpt::Scalar::random();
         auto const holderCt = cmpt::ElGamalCiphertext::encrypt(holderPub, amount, k);
@@ -66,9 +68,18 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
                 hexOf(cmpt::ElGamalCiphertext::encrypt(*auditorPub, amount, k).serialize());
         if (holderSecret)
         {
+            // Bind the registration proof to the transaction the account is
+            // about to submit. For a sequence-based transaction env.seq(account)
+            // is the sequence jtx autofills; for a ticketed transaction
+            // seqOverride carries the ticket number (getSeqValue()).
+            auto const seqValue = seqOverride.value_or(env.seq(account));
+            auto const contextId = cmpt::convertContextId(account.id(), id, seqValue);
             jv[sfHolderEncryptionKey] = hexOf(holderPub.serialize());
-            jv[sfZKProof] =
-                hexOf(cmpt::SchnorrProof::prove(*holderSecret, holderPub).serialize());
+            jv[sfZKProof] = hexOf(cmpt::SchnorrProof::prove(
+                                      *holderSecret,
+                                      holderPub,
+                                      Slice{contextId.data(), contextId.size()})
+                                      .serialize());
         }
         return jv;
     }
@@ -104,7 +115,7 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
             MPTTester mpt(env, alice, {.holders = {bob}});
             mpt.create({.flags = tfMPTCanTransfer});
             mpt.authorize({.account = bob});
-            env(convertJV(bob, mpt.issuanceID(), 100, bobPub, issuerPub, bobSk.x),
+            env(convertJV(env, bob, mpt.issuanceID(), 100, bobPub, issuerPub, bobSk.x),
                 Ter(temDISABLED));
         }
 
@@ -116,7 +127,7 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
             mpt.create({.flags = tfMPTCanTransfer});
             mpt.authorize({.account = bob});
             mpt.pay(alice, bob, 1000);
-            env(convertJV(bob, mpt.issuanceID(), 100, bobPub, issuerPub, bobSk.x),
+            env(convertJV(env, bob, mpt.issuanceID(), 100, bobPub, issuerPub, bobSk.x),
                 Ter(tecNO_PERMISSION));
         }
 
@@ -126,7 +137,7 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
             MPTTester mpt(env, alice, {.holders = {bob}});
             mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
             mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
-            env(convertJV(alice, mpt.issuanceID(), 100, bobPub, issuerPub, bobSk.x),
+            env(convertJV(env, alice, mpt.issuanceID(), 100, bobPub, issuerPub, bobSk.x),
                 Ter(temMALFORMED));
         }
     }
@@ -283,7 +294,7 @@ ConfidentialMPTSendPath_test::testConvertSuccess(FeatureBitset features)
         mpt.pay(alice, bob, 1000);
 
         auto const id = mpt.issuanceID();
-        env(convertJV(bob, id, 400, bobPub, issuerPub, bobSk.x));
+        env(convertJV(env, bob, id, 400, bobPub, issuerPub, bobSk.x));
         env.close();
 
         auto const tok = env.le(keylet::mptoken(id, bob.id()));
@@ -310,7 +321,7 @@ ConfidentialMPTSendPath_test::testConvertSuccess(FeatureBitset features)
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
 
-        auto jv = convertJV(bob, mpt.issuanceID(), 400, bobPub, issuerPub, bobSk.x);
+        auto jv = convertJV(env, bob, mpt.issuanceID(), 400, bobPub, issuerPub, bobSk.x);
         jv[sfMPTAmount] = std::to_string(401);  // mismatch
         env(jv, Ter(tecBAD_PROOF));
     }
@@ -323,7 +334,7 @@ ConfidentialMPTSendPath_test::testConvertSuccess(FeatureBitset features)
         mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
-        env(convertJV(bob, mpt.issuanceID(), 2000, bobPub, issuerPub, bobSk.x),
+        env(convertJV(env, bob, mpt.issuanceID(), 2000, bobPub, issuerPub, bobSk.x),
             Ter(tecINSUFFICIENT_FUNDS));
     }
 
@@ -340,7 +351,7 @@ ConfidentialMPTSendPath_test::testConvertSuccess(FeatureBitset features)
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
         auto const id = mpt.issuanceID();
-        env(convertJV(bob, id, 400, bobPub, issuerPub, bobSk.x, auditorPub));
+        env(convertJV(env, bob, id, 400, bobPub, issuerPub, bobSk.x, auditorPub));
         env.close();
         auto const tok = env.le(keylet::mptoken(id, bob.id()));
         BEAST_EXPECT(tok && tok->isFieldPresent(sfAuditorEncryptedBalance));
@@ -357,8 +368,46 @@ ConfidentialMPTSendPath_test::testConvertSuccess(FeatureBitset features)
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
         env(convertJV(
-                bob, mpt.issuanceID(), 400, bobPub, issuerPub, bobSk.x, auditorPub),
+                env, bob, mpt.issuanceID(), 400, bobPub, issuerPub, bobSk.x, auditorPub),
             Ter(tecNO_PERMISSION));
+    }
+
+    // Ticketed conversion exercises the SeqProxy binding at key registration. A
+    // ticketed transaction carries sfSequence == 0, so a proof bound to
+    // sequence 0 (the raw sfSequence) is rejected: the verifier binds the
+    // registration context to getSeqValue(), the ticket number. A proof bound
+    // to the ticket number is accepted.
+    {
+        Env env{*this, features};
+        MPTTester mpt(env, alice, {.holders = {bob}});
+        mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+        mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 1000);
+        auto const id = mpt.issuanceID();
+
+        std::uint32_t const ticketSeq = env.seq(bob) + 1;
+        env(ticket::create(bob, 2));
+        env.close();
+
+        // Bound to sequence 0 (the literal sfSequence of a ticketed tx) is
+        // rejected.
+        env(convertJV(
+                env, bob, id, 400, bobPub, issuerPub, bobSk.x, std::nullopt, 0u),
+            ticket::Use(ticketSeq),
+            Ter(tecBAD_PROOF));
+
+        // Bound to the ticket number (getSeqValue()) is accepted.
+        env(convertJV(
+                env, bob, id, 400, bobPub, issuerPub, bobSk.x, std::nullopt,
+                ticketSeq + 1),
+            ticket::Use(ticketSeq + 1));
+        env.close();
+
+        auto const tok = env.le(keylet::mptoken(id, bob.id()));
+        BEAST_EXPECT(tok && tok->getFieldU64(sfMPTAmount) == 600);
+        BEAST_EXPECT(tok && tok->isFieldPresent(sfHolderEncryptionKey));
+        BEAST_EXPECT(tok && tok->getFieldU32(sfConfidentialBalanceVersion) == 0);
     }
 }
 
@@ -383,7 +432,7 @@ ConfidentialMPTSendPath_test::testMergeInbox(FeatureBitset features)
         mpt.pay(alice, bob, 1000);
         auto const id = mpt.issuanceID();
 
-        env(convertJV(bob, id, 400, bobPub, issuerPub, bobSk.x));
+        env(convertJV(env, bob, id, 400, bobPub, issuerPub, bobSk.x));
         env.close();
 
         // Issuer cannot merge.
@@ -425,12 +474,12 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         mpt.pay(alice, bob, 1000);
         auto const id = mpt.issuanceID();
         // bob funds his confidential spending balance.
-        env(convertJV(bob, id, 1000, bobPub, issuerPub, bobSk.x));
+        env(convertJV(env, bob, id, 1000, bobPub, issuerPub, bobSk.x));
         env.close();
         env(mergeJV(bob, id));
         env.close();
         // carol opts in with a zero-amount conversion.
-        env(convertJV(carol, id, 0, carolPub, issuerPub, carolSk.x));
+        env(convertJV(env, carol, id, 0, carolPub, issuerPub, carolSk.x));
         env.close();
         env(mergeJV(carol, id));
         env.close();
@@ -495,11 +544,11 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         mpt.authorize({.account = carol});
         mpt.pay(alice, bob, 1000);
         auto const id = mpt.issuanceID();
-        env(convertJV(bob, id, 1000, bobPub, issuerPub, bobSk.x, auditorPub));
+        env(convertJV(env, bob, id, 1000, bobPub, issuerPub, bobSk.x, auditorPub));
         env.close();
         env(mergeJV(bob, id));
         env.close();
-        env(convertJV(carol, id, 0, carolPub, issuerPub, carolSk.x, auditorPub));
+        env(convertJV(env, carol, id, 0, carolPub, issuerPub, carolSk.x, auditorPub));
         env.close();
         env(mergeJV(carol, id));
         env.close();
@@ -585,12 +634,12 @@ ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
         mpt.pay(alice, bob, 1000);
         auto const id = mpt.issuanceID();
         // Bob funds his confidential spending balance
-        env(convertJV(bob, id, 1000, bobPub, issuerPub, bobSk.x));
+        env(convertJV(env, bob, id, 1000, bobPub, issuerPub, bobSk.x));
         env.close();
         env(mergeJV(bob, id));
         env.close();
         // Carol opts in with zero-amount conversion
-        env(convertJV(carol, id, 0, carolPub, issuerPub, carolSk.x));
+        env(convertJV(env, carol, id, 0, carolPub, issuerPub, carolSk.x));
         env.close();
         env(mergeJV(carol, id));
         env.close();

@@ -214,12 +214,84 @@ class ConfidentialMPTCrossVerify_test : public beast::unit_test::Suite
         // verify checks above, not by equal bytes.
     }
 
+    void
+    testPokSkBidirectional()
+    {
+        testcase("PoK-SK registration: bidirectional rippled ↔ mpt-crypto");
+
+        secp256k1_context* ctx = mpt_secp256k1_context();
+        BEAST_EXPECT(ctx != nullptr);
+
+        // Holder keypair to prove knowledge of.
+        cmpt::Scalar const holderSk = cmpt::Scalar::random();
+        cmpt::ECPoint const holderPub = cmpt::ECPoint::mulBase(holderSk);
+
+        // Non-zero 32-byte context_id so the binding is actually exercised.
+        unsigned char context_id[32];
+        for (int i = 0; i < 32; ++i)
+            context_id[i] = static_cast<unsigned char>(i + 1);
+
+        // ----------------------------------------------------------
+        // Direction (a): rippled prove → mpt-crypto verify
+        // ----------------------------------------------------------
+        {
+            auto const proof =
+                cmpt::SchnorrProof::prove(holderSk, holderPub, Slice{context_id, 32});
+            auto const proofBytes = proof.serialize();
+            BEAST_EXPECT(proofBytes.size() == SECP256K1_POK_SK_PROOF_SIZE);
+
+            secp256k1_pubkey pk = toSecp(ctx, holderPub);
+            int ok = secp256k1_mpt_pok_sk_verify(
+                ctx, proofBytes.data(), &pk, context_id);
+            BEAST_EXPECT(ok == 1);
+
+            // A different context_id must be rejected (replay protection).
+            unsigned char other[32];
+            std::memcpy(other, context_id, 32);
+            other[0] ^= 0xFF;
+            BEAST_EXPECT(
+                secp256k1_mpt_pok_sk_verify(ctx, proofBytes.data(), &pk, other) ==
+                0);
+        }
+
+        // ----------------------------------------------------------
+        // Direction (b): mpt-crypto prove → rippled verify
+        // ----------------------------------------------------------
+        {
+            auto const sk_bytes = scalarBytes(holderSk);
+            secp256k1_pubkey pk = toSecp(ctx, holderPub);
+
+            unsigned char proof_out[SECP256K1_POK_SK_PROOF_SIZE];
+            int ok = secp256k1_mpt_pok_sk_prove(
+                ctx, proof_out, &pk, sk_bytes.data(), context_id);
+            BEAST_EXPECT(ok == 1);
+
+            auto const proofOpt =
+                cmpt::SchnorrProof::deserialize(Slice{proof_out, sizeof(proof_out)});
+            BEAST_EXPECT(proofOpt.has_value());
+            BEAST_EXPECT(
+                proofOpt->verify(holderPub, Slice{context_id, 32}));
+
+            // The rippled verifier likewise rejects a mismatched context_id.
+            unsigned char other[32];
+            std::memcpy(other, context_id, 32);
+            other[31] ^= 0xFF;
+            BEAST_EXPECT(!proofOpt->verify(holderPub, Slice{other, 32}));
+        }
+
+        // No byte-identical serialization check: the rippled prover uses an
+        // independent random nonce while mpt-crypto derives a deterministic
+        // one, so proofs differ. Interop is established by the bidirectional
+        // verify checks above and by the shared challenge construction.
+    }
+
 public:
     void
     run() override
     {
         testClawbackBidirectional();
         testConvertBackBidirectional();
+        testPokSkBidirectional();
     }
 };
 

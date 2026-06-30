@@ -151,11 +151,20 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
             return tecBAD_PROOF;
     }
 
-    // A newly registered holder key must be proven via the Schnorr proof.
+    // A newly registered holder key must be proven via the Schnorr proof. Bind
+    // the proof to this transaction so it cannot be replayed: the context_id
+    // commits to the converting account, the issuance, and the transaction
+    // sequence, matching the reference mpt-crypto convert preimage. Use the
+    // SeqProxy value rather than sfSequence directly so ticketed transactions
+    // (sfSequence == 0) bind to their unique ticket number.
     if (txKey)
     {
+        auto const contextId = cmpt::convertContextId(
+            ctx.tx[sfAccount], mptIssuanceID, ctx.tx.getSeqValue());
+
         auto const zk = cmpt::SchnorrProof::deserialize(ctx.tx[sfZKProof]);
-        if (!zk || !zk->verify(*holderKey))
+        if (!zk ||
+            !zk->verify(*holderKey, Slice{contextId.data(), contextId.size()}))
             return tecBAD_PROOF;
     }
 

@@ -574,6 +574,37 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         BEAST_EXPECT(readSpending(env, id, bob).decrypt(bobSk.x, 2000) == 600);
     }
 
+    // Ticketed send exercises the SeqProxy binding. A ticketed transaction
+    // carries sfSequence == 0, so a proof bound to sequence 0 (the raw
+    // sfSequence) is rejected: the verifier binds the context to
+    // getSeqValue(), which returns the ticket number. A proof bound to the
+    // ticket number is accepted.
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+
+        std::uint32_t const ticketSeq = env.seq(bob) + 1;
+        env(ticket::create(bob, 2));
+        env.close();
+
+        // Bound to sequence 0 (the literal sfSequence of a ticketed tx) is
+        // rejected.
+        env(sendJV(
+                env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub,
+                issuerPub, readSpending(env, id, bob), std::nullopt, 0u),
+            ticket::Use(ticketSeq),
+            Ter(tecBAD_PROOF));
+
+        // Bound to the ticket number (getSeqValue()) is accepted.
+        env(sendJV(
+                env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub,
+                issuerPub, readSpending(env, id, bob), std::nullopt,
+                ticketSeq + 1),
+            ticket::Use(ticketSeq + 1));
+        env.close();
+        BEAST_EXPECT(readSpending(env, id, bob).decrypt(bobSk.x, 2000) == 600);
+    }
+
     // Audited issuance: the auditor mirror moves with a valid auditor
     // ciphertext and proof.
     {

@@ -40,6 +40,16 @@ key(ECPoint const& p)
     return std::string(reinterpret_cast<char const*>(b.data()), b.size());
 }
 
+// SHA-256 Fiat-Shamir challenge shared with the compact sigma proofs and the
+// registration PoK: e = reduce32(SHA256(domain || parts || context_id)). The
+// 32-byte contextId is appended only when non-empty. Defined later in the
+// file; forward-declared here so SchnorrProof can use it.
+Scalar
+compactChallenge(
+    Slice const& domain,
+    std::vector<Slice> const& parts,
+    Slice const& contextId);
+
 }  // namespace
 
 //------------------------------------------------------------------------------
@@ -220,7 +230,10 @@ ElGamalCiphertext::deserialize(Slice const& in)
 //------------------------------------------------------------------------------
 
 SchnorrProof
-SchnorrProof::prove(Scalar const& secret, ElGamalPublicKey const& pub)
+SchnorrProof::prove(
+    Scalar const& secret,
+    ElGamalPublicKey const& pub,
+    Slice const& contextId)
 {
     // Never produce a proof for the identity key (secret == 0). Such a key
     // removes the EC-ElGamal mask, so accepting it enables a rogue-key attack.
@@ -229,18 +242,19 @@ SchnorrProof::prove(Scalar const& secret, ElGamalPublicKey const& pub)
             "SchnorrProof::prove: identity/zero public key");
 
     Scalar const w = Scalar::random();
-    ECPoint const t = ECPoint::mulBase(w);  // commitment A = w*G
+    ECPoint const t = ECPoint::mulBase(w);  // commitment T = w*G
     auto const pb = pub.serialize();
     auto const tb = t.serialize();
-    Scalar const e = hashToScalar(
-        lit("XLS96-MPT/PoK/v1"),
-        {Slice{pb.data(), pb.size()}, Slice{tb.data(), tb.size()}});
+    Scalar const e = compactChallenge(
+        lit("CMPT_POK_SK_REGISTER"),
+        {Slice{pb.data(), pb.size()}, Slice{tb.data(), tb.size()}},
+        contextId);
     Scalar const s = w + e * secret;
     return SchnorrProof{e, s};
 }
 
 bool
-SchnorrProof::verify(ElGamalPublicKey const& pub) const
+SchnorrProof::verify(ElGamalPublicKey const& pub, Slice const& contextId) const
 {
     // Reject the identity/all-zero public key before any algebra: with pub at
     // infinity the e*Y term vanishes, so a proof for the zero secret would
@@ -248,13 +262,14 @@ SchnorrProof::verify(ElGamalPublicKey const& pub) const
     if (pub.isInfinity())
         return false;
 
-    // A' = s*G - e*Y
+    // T = s*G - e*Y
     ECPoint const t = ECPoint::mulBase(s_) - ECPoint::mul(e_, pub);
     auto const pb = pub.serialize();
     auto const tb = t.serialize();
-    Scalar const e = hashToScalar(
-        lit("XLS96-MPT/PoK/v1"),
-        {Slice{pb.data(), pb.size()}, Slice{tb.data(), tb.size()}});
+    Scalar const e = compactChallenge(
+        lit("CMPT_POK_SK_REGISTER"),
+        {Slice{pb.data(), pb.size()}, Slice{tb.data(), tb.size()}},
+        contextId);
     return e == e_;
 }
 
@@ -1420,6 +1435,22 @@ convertBackContextId(
             version,
             out.data()) != 0)
         Throw<std::runtime_error>("convertBackContextId: derivation failed");
+    return out;
+}
+
+std::array<std::uint8_t, kContextIdSize>
+convertContextId(
+    AccountID const& account,
+    MPTID const& issuanceId,
+    std::uint32_t sequence)
+{
+    std::array<std::uint8_t, kContextIdSize> out{};
+    if (mpt_get_convert_context_hash(
+            toAccountId(account),
+            toIssuanceId(issuanceId),
+            sequence,
+            out.data()) != 0)
+        Throw<std::runtime_error>("convertContextId: derivation failed");
     return out;
 }
 

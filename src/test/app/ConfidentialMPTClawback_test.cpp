@@ -36,16 +36,19 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
         return std::string(reinterpret_cast<char const*>(a.data()), a.size());
     }
 
-    // Build a ConfidentialMPTConvert JSON registering a new holder key.
+    // Build a ConfidentialMPTConvert JSON registering a new holder key. The
+    // registration proof is bound to the transaction's convert context_id.
     static json::Value
     convertJV(
+        jtx::Env& env,
         jtx::Account const& account,
         MPTID const& id,
         std::uint64_t amount,
         cmpt::ECPoint const& holderPub,
         cmpt::ECPoint const& issuerPub,
         cmpt::Scalar const& holderSecret,
-        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt)
+        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt,
+        std::optional<std::uint32_t> seqOverride = std::nullopt)
     {
         cmpt::Scalar const k = cmpt::Scalar::random();
         json::Value jv;
@@ -61,9 +64,14 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
         if (auditorPub)
             jv[sfAuditorEncryptedAmount] =
                 hexOf(cmpt::ElGamalCiphertext::encrypt(*auditorPub, amount, k).serialize());
+        auto const seqValue = seqOverride.value_or(env.seq(account));
+        auto const contextId = cmpt::convertContextId(account.id(), id, seqValue);
         jv[sfHolderEncryptionKey] = hexOf(holderPub.serialize());
-        jv[sfZKProof] =
-            hexOf(cmpt::SchnorrProof::prove(holderSecret, holderPub).serialize());
+        jv[sfZKProof] = hexOf(cmpt::SchnorrProof::prove(
+                                  holderSecret,
+                                  holderPub,
+                                  Slice{contextId.data(), contextId.size()})
+                                  .serialize());
         return jv;
     }
 
@@ -175,7 +183,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
         auto const id = mpt.issuanceID();
-        env(convertJV(bob, id, funded, bobPub, issuerPub, bobSk.x, auditorPub));
+        env(convertJV(env, bob, id, funded, bobPub, issuerPub, bobSk.x, auditorPub));
         env.close();
         env(mergeJV(bob, id));
         env.close();
@@ -239,7 +247,7 @@ ConfidentialMPTClawback_test::testClawback(FeatureBitset features)
         mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
         mpt.authorize({.account = bob});
         mpt.pay(alice, bob, 1000);
-        env(convertJV(bob, mpt.issuanceID(), 400, bobPub, issuerPub, bobSk.x));
+        env(convertJV(env, bob, mpt.issuanceID(), 400, bobPub, issuerPub, bobSk.x));
         env.close();
         env(clawbackJV(
                 env, alice, bob, mpt.issuanceID(), 400, issuerSk.x,

@@ -26,17 +26,19 @@ namespace cmpt {
     range proof is a self-contained, sound Bulletproof (logarithmic proof size).
 
     The compact AND-composed sigma proofs (CompactClawbackProof,
-    CompactConvertBackProof) are transcript-reconciled with the reference
-    mpt-crypto library: a SHA-256 Fiat-Shamir challenge over the same statement
-    ordering, 33-byte compressed points, 32-byte big-endian scalars, and an
-    optional 32-byte context_id. They cross-verify bidirectionally with
-    mpt-crypto (each implementation verifies the other's proofs). Proofs are
-    NOT bit-reproducible across implementations because the prover's nonce is
-    independent randomness (mpt-crypto salts its deterministic-nonce HKDF with
-    fresh entropy), but interoperability does not depend on a shared nonce. The
-    aggregated Bulletproof range proof remains self-consistent only, as the
-    reference C API exposes no standalone range-proof entrypoint. Send (tt88)
-    intentionally diverges (Option C, independent per-ciphertext randomness).
+    CompactConvertBackProof, CompactStandardProof) are transcript-reconciled
+    with the reference mpt-crypto library: a SHA-256 Fiat-Shamir challenge over
+    the same statement ordering, 33-byte compressed points, 32-byte big-endian
+    scalars, and an optional 32-byte context_id. They cross-verify
+    bidirectionally with mpt-crypto (each implementation verifies the other's
+    proofs). Proofs are NOT bit-reproducible across implementations because the
+    prover's nonce is independent randomness (mpt-crypto salts its
+    deterministic-nonce HKDF with fresh entropy), but interoperability does not
+    depend on a shared nonce. The aggregated Bulletproof range proof remains
+    self-consistent only, as the reference C API exposes no standalone
+    range-proof entrypoint. Send (tt88) uses CompactStandardProof: all recipient
+    mirrors share a single ciphertext nonce r (shared-randomness model), which
+    the succinct 192-byte proof binds together.
 */
 
 /// Serialized size of an EC-ElGamal public key (one compressed point).
@@ -563,16 +565,27 @@ private:
 
 /** Compact AND-composed sigma proof for standard EC-ElGamal send (XLS-0096).
 
-    Stub for Phase 1 integration. Placeholder for the compact sigma protocol
-    that replaces PlaintextEqualityProof + LinkageProof pairs in the send path
-    with a single 192-byte proof via AND composition. Real implementation comes
-    in Phase 2 (issue #14) using mpt-crypto proof_compact_standard.c.
+    Proves, under a single shared ciphertext nonce r, the combined send
+    statement over n recipient mirrors (sender, destination, issuer, and
+    optionally auditor) with witnesses (r, m, sk_A, rho, b):
+      - C1            = r*G                          (shared ciphertext nonce)
+      - C_{2,i}       = m*G + r*pk_i    for i = 1..n  (each mirror encrypts m)
+      - PC_m          = m*G + r*H                     (amount commitment; blind == r)
+      - pk_A          = sk_A*G                        (sender public key)
+      - PC_b          = b*G + rho*H                   (post-debit balance commitment)
+      - B2 - b*G      = sk_A*B1                       (balance ciphertext decrypts to b)
 
-    NOTE: rippled's Send (ConfidentialMPTSend, tt88) uses INDEPENDENT
-    randomness per ciphertext by deliberate design (Option C); Send proofs
-    therefore intentionally do NOT cross-verify byte-for-byte with the
-    reference mpt-crypto CompactStandardProof, which assumes shared
-    randomness.
+    Compact proof: (e, z_m, z_r, z_b, z_rho, z_sk) in Z_q^6 = 192 bytes. Domain:
+    "CMPT_SEND_SIGMA". Transcript-reconciled with the reference mpt-crypto
+    proof_compact_standard.c (SHA-256 Fiat-Shamir over the same statement and
+    commitment ordering, 33-byte compressed points, 32-byte big-endian scalars,
+    optional 32-byte context_id), so the two implementations cross-verify
+    bidirectionally.
+
+    All recipient ciphertexts MUST share the same first component C1: prove()
+    throws and verify() returns false otherwise. The recipient key / ciphertext
+    vectors are parallel (recipientKeys[i] owns recipientCts[i]) and must be
+    non-empty.
 */
 class CompactStandardProof
 {
@@ -586,31 +599,55 @@ public:
     }
 
     CompactStandardProof() = default;
+    CompactStandardProof(
+        Scalar e,
+        Scalar zm,
+        Scalar zr,
+        Scalar zb,
+        Scalar zrho,
+        Scalar zsk)
+        : e_(e), zm_(zm), zr_(zr), zb_(zb), zrho_(zrho), zsk_(zsk)
+    {
+    }
 
-    // TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
+    /** Prove the shared-randomness send statement.
+
+        @param secret        the sender's ElGamal secret key sk_A (pk_A = sk_A*G).
+        @param amount        the transferred amount m.
+        @param balance       the post-debit spending balance b.
+        @param rShared       the shared ciphertext nonce r (also PC_m's blind).
+        @param rho           the balance commitment blinding factor.
+        @param recipientKeys the mirror public keys [sender, dest, issuer, ...].
+        @param recipientCts  the mirror ciphertexts, all sharing C1 = r*G.
+        @param amountCommit  the amount commitment PC_m = m*G + r*H.
+        @param senderKey     the sender public key pk_A.
+        @param postDebit     the post-debit spending balance ciphertext (B1, B2).
+        @param balanceCommit the balance commitment PC_b = b*G + rho*H.
+    */
     static CompactStandardProof
     prove(
         Scalar const& secret,
         std::uint64_t amount,
         std::uint64_t balance,
         Scalar const& rShared,
-        Scalar const& rAmount,
-        Scalar const& rBalance,
-        ElGamalPublicKey const& recipientKey,
-        ElGamalCiphertext const& recipientCt,
-        ElGamalCiphertext const& postDebitCt,
+        Scalar const& rho,
+        std::vector<ElGamalPublicKey> const& recipientKeys,
+        std::vector<ElGamalCiphertext> const& recipientCts,
         PedersenCommitment const& amountCommit,
-        PedersenCommitment const& balanceCommit);
+        ElGamalPublicKey const& senderKey,
+        ElGamalCiphertext const& postDebit,
+        PedersenCommitment const& balanceCommit,
+        Slice const& contextId = {});
 
-    // TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
     [[nodiscard]] bool
     verify(
-        ElGamalPublicKey const& senderKey,
-        ElGamalPublicKey const& recipientKey,
-        ElGamalCiphertext const& recipientCt,
-        ElGamalCiphertext const& postDebitCt,
+        std::vector<ElGamalPublicKey> const& recipientKeys,
+        std::vector<ElGamalCiphertext> const& recipientCts,
         PedersenCommitment const& amountCommit,
-        PedersenCommitment const& balanceCommit) const;
+        ElGamalPublicKey const& senderKey,
+        ElGamalCiphertext const& postDebit,
+        PedersenCommitment const& balanceCommit,
+        Slice const& contextId = {}) const;
 
     [[nodiscard]] std::array<std::uint8_t, kSize>
     serialize() const;
@@ -619,7 +656,12 @@ public:
     deserialize(Slice const& in);
 
 private:
-    std::array<std::uint8_t, kSize> data_{};
+    Scalar e_;
+    Scalar zm_;
+    Scalar zr_;
+    Scalar zb_;
+    Scalar zrho_;
+    Scalar zsk_;
 };
 
 //------------------------------------------------------------------------------

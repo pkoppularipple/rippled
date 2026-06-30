@@ -249,13 +249,22 @@ public:
 
     /** Prove that commit(value, blind) lies in [0, 2^bits).
 
+        An optional 32-byte context_id is folded into the Fiat-Shamir
+        transcript (before the first challenge, so it binds every subsequent
+        challenge), binding the proof to a single transaction.
+
         @return the proof together with the commitment it proves.
     */
     static std::pair<RangeProof, PedersenCommitment>
-    prove(std::uint64_t value, Scalar const& blind, std::uint8_t bits);
+    prove(
+        std::uint64_t value,
+        Scalar const& blind,
+        std::uint8_t bits,
+        Slice const& contextId = {});
 
     [[nodiscard]] bool
-    verify(PedersenCommitment const& commitment) const;
+    verify(PedersenCommitment const& commitment, Slice const& contextId = {})
+        const;
 
     [[nodiscard]] std::uint8_t
     bits() const
@@ -342,13 +351,15 @@ public:
         std::uint64_t value,
         Scalar const& blind,
         ElGamalCiphertext const& ct,
-        PedersenCommitment const& commitment);
+        PedersenCommitment const& commitment,
+        Slice const& contextId = {});
 
     [[nodiscard]] bool
     verify(
         ElGamalPublicKey const& pub,
         ElGamalCiphertext const& ct,
-        PedersenCommitment const& commitment) const;
+        PedersenCommitment const& commitment,
+        Slice const& contextId = {}) const;
 
     [[nodiscard]] std::array<std::uint8_t, kSize>
     serialize() const;
@@ -412,14 +423,16 @@ public:
         Scalar const& k1,
         Scalar const& k2,
         ElGamalCiphertext const& ct1,
-        ElGamalCiphertext const& ct2);
+        ElGamalCiphertext const& ct2,
+        Slice const& contextId = {});
 
     [[nodiscard]] bool
     verify(
         ElGamalPublicKey const& pub1,
         ElGamalPublicKey const& pub2,
         ElGamalCiphertext const& ct1,
-        ElGamalCiphertext const& ct2) const;
+        ElGamalCiphertext const& ct2,
+        Slice const& contextId = {}) const;
 
     [[nodiscard]] std::array<std::uint8_t, kSize>
     serialize() const;
@@ -655,6 +668,17 @@ convertContextId(
     AccountID const& account,
     MPTID const& issuanceId,
     std::uint32_t sequence);
+
+/// Send context_id: binds the spending account, issuance, transaction
+/// sequence, destination account, and the pre-transaction confidential balance
+/// version. Mirrors mpt_get_send_context_hash.
+[[nodiscard]] std::array<std::uint8_t, kContextIdSize>
+sendContextId(
+    AccountID const& account,
+    MPTID const& issuanceId,
+    std::uint32_t sequence,
+    AccountID const& dest,
+    std::uint32_t version);
 
 }  // namespace cmpt
 }  // namespace xrpl

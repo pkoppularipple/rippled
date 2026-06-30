@@ -242,9 +242,22 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     if (!proofs)
         return tecBAD_PROOF;
 
+    // Bind every proof in the bundle to this transaction's context_id. The
+    // version is the sender's pre-transaction confidential balance version
+    // (bumped in doApply); getSeqValue() binds ticketed transactions to their
+    // ticket number rather than sfSequence == 0.
+    std::uint32_t const version =
+        sleSender->isFieldPresent(sfConfidentialBalanceVersion)
+        ? sleSender->getFieldU32(sfConfidentialBalanceVersion)
+        : 0u;
+    auto const contextId = cmpt::sendContextId(
+        ctx.tx[sfAccount], id, ctx.tx.getSeqValue(), dest, version);
+    Slice const ctxId{contextId.data(), contextId.size()};
+
     // Ciphertext consistency across the recipient / mirror ciphertexts.
-    if (!proofs->peqDest.verify(senderKey, destKey, senderCt, destCt) ||
-        !proofs->peqIssuer.verify(senderKey, issuerKey, senderCt, issuerCt))
+    if (!proofs->peqDest.verify(senderKey, destKey, senderCt, destCt, ctxId) ||
+        !proofs->peqIssuer.verify(
+            senderKey, issuerKey, senderCt, issuerCt, ctxId))
         return tecBAD_PROOF;
 
     if (hasAuditor)
@@ -253,21 +266,22 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         auto const auditorCt =
             *cmpt::ElGamalCiphertext::deserialize(ctx.tx[sfAuditorEncryptedAmount]);
         if (auditorKey.isInfinity() || !proofs->peqAuditor ||
-            !proofs->peqAuditor->verify(senderKey, auditorKey, senderCt, auditorCt))
+            !proofs->peqAuditor->verify(
+                senderKey, auditorKey, senderCt, auditorCt, ctxId))
             return tecBAD_PROOF;
     }
 
     // Amount linkage + range proof on the transferred amount.
-    if (!proofs->linkAmount.verify(senderKey, senderCt, amountCommit) ||
-        !proofs->rangeAmount.verify(amountCommit))
+    if (!proofs->linkAmount.verify(senderKey, senderCt, amountCommit, ctxId) ||
+        !proofs->rangeAmount.verify(amountCommit, ctxId))
         return tecBAD_PROOF;
 
     // Balance linkage + range proof on the post-debit spending balance
     // (proves the remaining confidential balance is non-negative).
     auto const postDebit =
         loadCt(*sleSender, sfConfidentialBalanceSpending) - senderCt;
-    if (!proofs->linkBalance.verify(senderKey, postDebit, balanceCommit) ||
-        !proofs->rangeBalance.verify(balanceCommit))
+    if (!proofs->linkBalance.verify(senderKey, postDebit, balanceCommit, ctxId) ||
+        !proofs->rangeBalance.verify(balanceCommit, ctxId))
         return tecBAD_PROOF;
 
     return tesSUCCESS;

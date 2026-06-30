@@ -166,6 +166,7 @@ private:
 
     static json::Value
     sendJV(
+        jtx::Env& env,
         jtx::Account const& from,
         jtx::Account const& to,
         MPTID const& id,
@@ -176,7 +177,8 @@ private:
         cmpt::ECPoint const& destPub,
         cmpt::ECPoint const& issuerPub,
         cmpt::ElGamalCiphertext const& senderSpending,
-        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt);
+        std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt,
+        std::optional<std::uint32_t> seqOverride = std::nullopt);
 
     static cmpt::ElGamalCiphertext
     readSpending(jtx::Env& env, MPTID const& id, jtx::Account const& a);
@@ -195,6 +197,7 @@ ConfidentialMPTSendPath_test::readSpending(
 
 json::Value
 ConfidentialMPTSendPath_test::sendJV(
+    jtx::Env& env,
     jtx::Account const& from,
     jtx::Account const& to,
     MPTID const& id,
@@ -205,9 +208,25 @@ ConfidentialMPTSendPath_test::sendJV(
     cmpt::ECPoint const& destPub,
     cmpt::ECPoint const& issuerPub,
     cmpt::ElGamalCiphertext const& senderSpending,
-    std::optional<cmpt::ECPoint> const& auditorPub)
+    std::optional<cmpt::ECPoint> const& auditorPub,
+    std::optional<std::uint32_t> seqOverride)
 {
     using namespace cmpt;
+
+    // Bind every proof to the transaction the sender is about to submit. The
+    // version is the sender's current confidential balance version; for a
+    // ticketed transaction seqOverride carries the ticket number
+    // (getSeqValue()), otherwise env.seq(from) is the autofilled sequence.
+    auto const sleSender = env.le(keylet::mptoken(id, from.id()));
+    std::uint32_t const version =
+        (sleSender && sleSender->isFieldPresent(sfConfidentialBalanceVersion))
+        ? sleSender->getFieldU32(sfConfidentialBalanceVersion)
+        : 0u;
+    auto const seqValue = seqOverride.value_or(env.seq(from));
+    auto const contextId =
+        cmpt::sendContextId(from.id(), id, seqValue, to.id(), version);
+    Slice const ctxId{contextId.data(), contextId.size()};
+
     Scalar const kt = Scalar::random();
     Scalar const kd = Scalar::random();
     Scalar const ki = Scalar::random();
@@ -216,20 +235,22 @@ ConfidentialMPTSendPath_test::sendJV(
     auto const issuerCt = ElGamalCiphertext::encrypt(issuerPub, amount, ki);
 
     Scalar const ra = Scalar::random();
-    auto const [rangeAmount, amountCommit] = RangeProof::prove(amount, ra, 63);
-    auto const linkAmount =
-        LinkageProof::prove(senderSecret, amount, ra, senderCt, amountCommit);
+    auto const [rangeAmount, amountCommit] =
+        RangeProof::prove(amount, ra, 63, ctxId);
+    auto const linkAmount = LinkageProof::prove(
+        senderSecret, amount, ra, senderCt, amountCommit, ctxId);
 
     auto const postDebit = senderSpending - senderCt;
     Scalar const rb = Scalar::random();
-    auto const [rangeBalance, balanceCommit] = RangeProof::prove(remaining, rb, 63);
-    auto const linkBalance =
-        LinkageProof::prove(senderSecret, remaining, rb, postDebit, balanceCommit);
+    auto const [rangeBalance, balanceCommit] =
+        RangeProof::prove(remaining, rb, 63, ctxId);
+    auto const linkBalance = LinkageProof::prove(
+        senderSecret, remaining, rb, postDebit, balanceCommit, ctxId);
 
     auto const peqDest = PlaintextEqualityProof::prove(
-        senderPub, destPub, amount, kt, kd, senderCt, destCt);
+        senderPub, destPub, amount, kt, kd, senderCt, destCt, ctxId);
     auto const peqIssuer = PlaintextEqualityProof::prove(
-        senderPub, issuerPub, amount, kt, ki, senderCt, issuerCt);
+        senderPub, issuerPub, amount, kt, ki, senderCt, issuerCt, ctxId);
 
     // Optional auditor mirror: a fresh ciphertext plus its equality proof,
     // serialized between the issuer proof and the linkage proofs.
@@ -240,7 +261,7 @@ ConfidentialMPTSendPath_test::sendJV(
         Scalar const ka = Scalar::random();
         auditorCt = ElGamalCiphertext::encrypt(*auditorPub, amount, ka);
         peqAuditor = PlaintextEqualityProof::prove(
-            senderPub, *auditorPub, amount, kt, ka, senderCt, *auditorCt);
+            senderPub, *auditorPub, amount, kt, ka, senderCt, *auditorCt, ctxId);
     }
 
     Blob bundle;
@@ -494,7 +515,7 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         auto const before = env.le(keylet::mptoken(id, bob.id()))
                                 ->getFieldU32(sfConfidentialBalanceVersion);
         env(sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob)));
         env.close();
 
@@ -521,12 +542,36 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env);
         auto jv = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         auto proof = *strUnHex(jv[sfZKProof].asString());
         proof[0] ^= 0x01;
         jv[sfZKProof] = strHex(proof);
         env(jv, Ter(tecBAD_PROOF));
+    }
+
+    // The bundle is bound to the transaction context_id (sender, issuance,
+    // sequence, destination, balance version). A bundle generated for a
+    // different sequence no longer verifies; one built for the actual sequence
+    // is accepted.
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+
+        // Bound to the wrong sequence: rejected.
+        env(sendJV(
+                env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub,
+                issuerPub, readSpending(env, id, bob), std::nullopt,
+                env.seq(bob) + 99),
+            Ter(tecBAD_PROOF));
+        env.close();
+
+        // Bound to the actual sequence: accepted.
+        env(sendJV(
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob)));
+        env.close();
+        BEAST_EXPECT(readSpending(env, id, bob).decrypt(bobSk.x, 2000) == 600);
     }
 
     // Audited issuance: the auditor mirror moves with a valid auditor
@@ -554,7 +599,7 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         env.close();
 
         env(sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob), auditorPub));
         env.close();
         auto const tok = env.le(keylet::mptoken(id, carol.id()));
@@ -568,7 +613,7 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         auto const id = setup(env);
         auto const auditorPub = cmpt::ElGamalSecretKey::random().publicKey();
         auto jv = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         jv[sfAuditorEncryptedAmount] =
             hexOf(cmpt::ElGamalCiphertext::encrypt(auditorPub, 400).serialize());
@@ -583,7 +628,7 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         mpt.authorize({.account = bob});
         mpt.authorize({.account = carol});
         env(sendJV(
-                bob, carol, mpt.issuanceID(), 1, 0, bobSk.x, bobPub, carolPub,
+                env, bob, carol, mpt.issuanceID(), 1, 0, bobSk.x, bobPub, carolPub,
                 issuerPub, cmpt::ElGamalCiphertext::encryptZero()),
             Ter(temDISABLED));
     }
@@ -593,7 +638,7 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         Env env{*this, features - featureCredentials};
         auto const id = setup(env);
         auto jv = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         jv[sfCredentialIDs.jsonName] = json::ValueType::Array;
         jv[sfCredentialIDs.jsonName].append("ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD");
@@ -652,7 +697,7 @@ ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
         env(fset(carol, asfDepositAuth));
         env.close();
         auto jv = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         env(jv, Ter(tecNO_PERMISSION));
     }
@@ -665,7 +710,7 @@ ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
         env(deposit::auth(carol, bob));
         env.close();
         auto jv = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         env(jv);
         env.close();
@@ -687,7 +732,7 @@ ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
         env(fset(carol, asfDepositAuth));
         env.close();
         auto jsend = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         jsend[sfCredentialIDs.jsonName] = json::ValueType::Array;
         jsend[sfCredentialIDs.jsonName].append(credIdx);
@@ -708,7 +753,7 @@ ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
         env(deposit::authCredentials(carol, {{.issuer = credIssuer, .credType = credType}}));
         env.close();
         auto jsend = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         jsend[sfCredentialIDs.jsonName] = json::ValueType::Array;
         jsend[sfCredentialIDs.jsonName].append(credIdx);
@@ -728,7 +773,7 @@ ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
         env(deposit::authCredentials(carol, {{.issuer = credIssuer, .credType = credType}}));
         env.close();
         auto jsend = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         jsend[sfCredentialIDs.jsonName] = json::ValueType::Array;
         jsend[sfCredentialIDs.jsonName].append(
@@ -740,7 +785,7 @@ ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
         Env env{*this, features};
         auto const id = setup(env);
         auto jsend = sendJV(
-            bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
             readSpending(env, id, bob));
         env(jsend);
         env.close();

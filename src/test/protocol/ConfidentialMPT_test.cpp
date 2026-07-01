@@ -393,6 +393,72 @@ ConfidentialMPT_test::testRangeProof()
         auto const back = RangeProof::deserialize(Slice{blob.data(), blob.size()});
         BEAST_EXPECT(back.has_value() && back->verify(c));
     }
+
+    // Aggregated (multi-value) Bulletproof: two 63-bit values proven together,
+    // as used by ConfidentialMPTSend (amount + post-debit balance).
+    {
+        std::uint8_t const w = 63;
+        Scalar const ra = Scalar::random();
+        Scalar const rb = Scalar::random();
+        std::uint64_t const amount = 400;
+        std::uint64_t const balance = 600;
+        auto const [agg, commits] =
+            RangeProof::proveAggregated({amount, balance}, {ra, rb}, w);
+        BEAST_EXPECT(commits.size() == 2);
+        BEAST_EXPECT(agg.values() == 2);
+        BEAST_EXPECT(agg.verifyAggregated(commits));
+
+        // The commitments are the plain Pedersen commitments of each value.
+        BEAST_EXPECT(commits[0] == PedersenCommitment::commit(amount, ra));
+        BEAST_EXPECT(commits[1] == PedersenCommitment::commit(balance, rb));
+
+        // Aggregation is logarithmic: N = padTo(63) * 2 = 128 -> 7 IPA rounds,
+        // and the wire form carries no leading width byte.
+        auto const sb = agg.serializeAggregated();
+        BEAST_EXPECT(
+            sb.size() == RangeProof::serializedSizeAggregated(w, 2));
+        BEAST_EXPECT(sb.size() == 754);
+
+        auto const back = RangeProof::deserializeAggregated(
+            Slice{sb.data(), sb.size()}, w, 2);
+        BEAST_EXPECT(back.has_value() && back->verifyAggregated(commits));
+
+        // Commitment order matters: swapping the two commitments must fail.
+        BEAST_EXPECT(!agg.verifyAggregated({commits[1], commits[0]}));
+
+        // A tampered scalar (tauX, first scalar after A, S, T1, T2) breaks it.
+        auto tampered = sb;
+        tampered[4 * cmpt::kPointSize] ^= 0x01;
+        auto const bad = RangeProof::deserializeAggregated(
+            Slice{tampered.data(), tampered.size()}, w, 2);
+        BEAST_EXPECT(bad.has_value() && !bad->verifyAggregated(commits));
+
+        // Wrong shape on deserialize is rejected (size mismatch).
+        BEAST_EXPECT(!RangeProof::deserializeAggregated(
+            Slice{sb.data(), sb.size()}, w, 4));
+    }
+
+    // Aggregated soundness: any value outside [0, 2^bits) fails to verify.
+    {
+        std::uint8_t const w = 63;
+        Scalar const ra = Scalar::random();
+        Scalar const rb = Scalar::random();
+        std::uint64_t const ok = 12345;
+        std::uint64_t const bad = std::uint64_t{1} << 63;  // >= 2^63
+        auto const [agg, commits] =
+            RangeProof::proveAggregated({ok, bad}, {ra, rb}, w);
+        BEAST_EXPECT(!agg.verifyAggregated(commits));
+    }
+
+    // Aggregated with a single value reduces to a valid one-value proof.
+    {
+        std::uint8_t const w = 32;
+        Scalar const r = Scalar::random();
+        auto const [agg, commits] =
+            RangeProof::proveAggregated({0xdeadbeef}, {r}, w);
+        BEAST_EXPECT(commits.size() == 1 && agg.values() == 1);
+        BEAST_EXPECT(agg.verifyAggregated(commits));
+    }
 }
 
 void

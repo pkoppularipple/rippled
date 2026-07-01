@@ -45,65 +45,59 @@ validPoint(std::optional<Slice> const& s)
 }
 
 // The transferred amount and the post-debit spending balance must both lie in
-// [0, 2^63). RangeProof is self-describing (its leading byte is the bit width)
-// and verify() checks the value only against that embedded width, so the wire
-// format pins the width here: a bundle carrying a wider (e.g. 64-bit) proof
-// would otherwise verify while asserting a weaker bound than this preclaim
-// relies on.
+// [0, 2^63). The aggregated range proof is not self-describing, so the wire
+// format pins the width and value count here: a bundle proving a wider (e.g.
+// 64-bit) range would otherwise verify while asserting a weaker bound than this
+// preclaim relies on.
 constexpr std::uint8_t kSendRangeBits = 63;
+
+// Two aggregated values: the transferred amount and the remaining spending
+// balance, proven together in a single Bulletproof.
+constexpr std::uint8_t kSendRangeValues = 2;
 
 // Layout of the ZKProof bundle carried by ConfidentialMPTSend: a single
 // 192-byte compact AND-composed sigma proof (CompactStandardProof) binding
-// every recipient mirror under one shared ciphertext nonce, followed by two
-// logarithmic aggregated-Bulletproof range proofs (one for the transferred
-// amount, one for the remaining spending balance). Each range proof is
-// self-describing via its leading bit-width byte, which must be exactly
-// kSendRangeBits.
+// every recipient mirror under one shared ciphertext nonce, followed by one
+// aggregated Bulletproof range proof (754 bytes) covering both the transferred
+// amount and the remaining spending balance. The bundle is a fixed 946 bytes.
 struct SendProofs
 {
     cmpt::CompactStandardProof standard;
-    cmpt::RangeProof rangeAmount;
-    cmpt::RangeProof rangeBalance;
+    cmpt::RangeProof range;  // aggregated over {amount, balance}
 };
+
+// Exact ZKProof bundle size: 192-byte compact sigma proof + 754-byte aggregated
+// range proof = 946 bytes.
+std::size_t
+sendZKProofSize()
+{
+    return cmpt::CompactStandardProof::serializedSize() +
+        cmpt::RangeProof::serializedSizeAggregated(
+            kSendRangeBits, kSendRangeValues);
+}
 
 std::optional<SendProofs>
 parseSendProofs(Slice const& in)
 {
     constexpr std::size_t std_ = cmpt::CompactStandardProof::serializedSize();
-    if (in.size() < std_ + 2)
+    std::size_t const rng_ = cmpt::RangeProof::serializedSizeAggregated(
+        kSendRangeBits, kSendRangeValues);
+    if (in.size() != std_ + rng_)
         return std::nullopt;
 
-    auto sub = [&](std::size_t off, std::size_t len) {
-        return Slice{in.data() + off, len};
-    };
-
     SendProofs p;
-    std::size_t off = 0;
-    auto sp = cmpt::CompactStandardProof::deserialize(sub(off, std_));
-    off += std_;
+    auto sp = cmpt::CompactStandardProof::deserialize(Slice{in.data(), std_});
     if (!sp)
         return std::nullopt;
     p.standard = *sp;
 
-    // The two range proofs are self-describing: byte 0 is the bit width. The
-    // wire format requires both to be exactly kSendRangeBits, so reject any
-    // other width up front (a wider proof would assert a weaker [0, 2^bits)
-    // bound than this preclaim depends on).
-    std::size_t const rem = in.size() - off;
-    std::uint8_t const bitsA = in.data()[off];
-    if (bitsA != kSendRangeBits)
+    // The aggregated range proof carries no width byte: its shape (bit width
+    // and value count) is fixed by the transaction type.
+    auto rg = cmpt::RangeProof::deserializeAggregated(
+        Slice{in.data() + std_, rng_}, kSendRangeBits, kSendRangeValues);
+    if (!rg)
         return std::nullopt;
-    std::size_t const lenA = cmpt::RangeProof::serializedSize(bitsA);
-    if (rem <= lenA)
-        return std::nullopt;
-    auto ra = cmpt::RangeProof::deserialize(sub(off, lenA));
-    auto rb = cmpt::RangeProof::deserialize(sub(off + lenA, rem - lenA));
-    if (!ra || !rb)
-        return std::nullopt;
-    if (ra->bits() != kSendRangeBits || rb->bits() != kSendRangeBits)
-        return std::nullopt;
-    p.rangeAmount = *ra;
-    p.rangeBalance = *rb;
+    p.range = *rg;
     return p;
 }
 
@@ -149,6 +143,13 @@ ConfidentialMPTSend::preflight(PreflightContext const& ctx)
 
     if (!validPoint(ctx.tx[~sfAmountCommitment]) ||
         !validPoint(ctx.tx[~sfBalanceCommitment]))
+        return temMALFORMED;
+
+    // The ZKProof bundle is a fixed 946 bytes: a 192-byte compact sigma proof
+    // followed by a 754-byte aggregated Bulletproof range proof. Reject any
+    // other size up front so malformed bundles never reach proof verification.
+    auto const zk = ctx.tx[~sfZKProof];
+    if (!zk || zk->size() != sendZKProofSize())
         return temMALFORMED;
 
     if (auto const err = credentials::checkFields(ctx.tx, ctx.j); !isTesSuccess(err))
@@ -281,10 +282,10 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
             ctxId))
         return tecBAD_PROOF;
 
-    // Range proofs: the transferred amount and the remaining spending balance
-    // both lie in [0, 2^63).
-    if (!proofs->rangeAmount.verify(amountCommit, ctxId) ||
-        !proofs->rangeBalance.verify(balanceCommit, ctxId))
+    // Aggregated range proof: the transferred amount and the remaining spending
+    // balance both lie in [0, 2^63), proven together in a single Bulletproof.
+    // The commitment order must match the prover: {amount, balance}.
+    if (!proofs->range.verifyAggregated({amountCommit, balanceCommit}, ctxId))
         return tecBAD_PROOF;
 
     return tesSUCCESS;

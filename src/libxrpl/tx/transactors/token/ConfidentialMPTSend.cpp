@@ -18,6 +18,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 namespace xrpl {
 
@@ -43,29 +44,33 @@ validPoint(std::optional<Slice> const& s)
         cmpt::ECPoint::deserialize(*s).has_value();
 }
 
-// Layout of the ZKProof bundle carried by ConfidentialMPTSend: the
-// plaintext-equality and linkage sigma proofs followed by two logarithmic
-// aggregated-Bulletproof range proofs (one for the transferred amount, one for
-// the remaining spending balance). Each range proof is self-describing via its
-// leading bit-width byte.
+// The transferred amount and the post-debit spending balance must both lie in
+// [0, 2^63). RangeProof is self-describing (its leading byte is the bit width)
+// and verify() checks the value only against that embedded width, so the wire
+// format pins the width here: a bundle carrying a wider (e.g. 64-bit) proof
+// would otherwise verify while asserting a weaker bound than this preclaim
+// relies on.
+constexpr std::uint8_t kSendRangeBits = 63;
+
+// Layout of the ZKProof bundle carried by ConfidentialMPTSend: a single
+// 192-byte compact AND-composed sigma proof (CompactStandardProof) binding
+// every recipient mirror under one shared ciphertext nonce, followed by two
+// logarithmic aggregated-Bulletproof range proofs (one for the transferred
+// amount, one for the remaining spending balance). Each range proof is
+// self-describing via its leading bit-width byte, which must be exactly
+// kSendRangeBits.
 struct SendProofs
 {
-    cmpt::PlaintextEqualityProof peqDest;
-    cmpt::PlaintextEqualityProof peqIssuer;
-    std::optional<cmpt::PlaintextEqualityProof> peqAuditor;
-    cmpt::LinkageProof linkAmount;
-    cmpt::LinkageProof linkBalance;
+    cmpt::CompactStandardProof standard;
     cmpt::RangeProof rangeAmount;
     cmpt::RangeProof rangeBalance;
 };
 
 std::optional<SendProofs>
-parseSendProofs(Slice const& in, bool hasAuditor)
+parseSendProofs(Slice const& in)
 {
-    constexpr std::size_t peq = cmpt::PlaintextEqualityProof::serializedSize();
-    constexpr std::size_t link = cmpt::LinkageProof::serializedSize();
-    std::size_t const fixed = 2 * peq + (hasAuditor ? peq : 0) + 2 * link;
-    if (in.size() < fixed + 2)
+    constexpr std::size_t std_ = cmpt::CompactStandardProof::serializedSize();
+    if (in.size() < std_ + 2)
         return std::nullopt;
 
     auto sub = [&](std::size_t off, std::size_t len) {
@@ -74,35 +79,19 @@ parseSendProofs(Slice const& in, bool hasAuditor)
 
     SendProofs p;
     std::size_t off = 0;
-    auto pd = cmpt::PlaintextEqualityProof::deserialize(sub(off, peq));
-    off += peq;
-    auto pi = cmpt::PlaintextEqualityProof::deserialize(sub(off, peq));
-    off += peq;
-    if (!pd || !pi)
+    auto sp = cmpt::CompactStandardProof::deserialize(sub(off, std_));
+    off += std_;
+    if (!sp)
         return std::nullopt;
-    p.peqDest = *pd;
-    p.peqIssuer = *pi;
-    if (hasAuditor)
-    {
-        auto pa = cmpt::PlaintextEqualityProof::deserialize(sub(off, peq));
-        off += peq;
-        if (!pa)
-            return std::nullopt;
-        p.peqAuditor = *pa;
-    }
-    auto la = cmpt::LinkageProof::deserialize(sub(off, link));
-    off += link;
-    auto lb = cmpt::LinkageProof::deserialize(sub(off, link));
-    off += link;
-    if (!la || !lb)
-        return std::nullopt;
-    p.linkAmount = *la;
-    p.linkBalance = *lb;
+    p.standard = *sp;
 
-    // The two range proofs are self-describing: byte 0 is the bit width.
+    // The two range proofs are self-describing: byte 0 is the bit width. The
+    // wire format requires both to be exactly kSendRangeBits, so reject any
+    // other width up front (a wider proof would assert a weaker [0, 2^bits)
+    // bound than this preclaim depends on).
     std::size_t const rem = in.size() - off;
     std::uint8_t const bitsA = in.data()[off];
-    if (bitsA == 0 || bitsA > cmpt::RangeProof::kMaxBits)
+    if (bitsA != kSendRangeBits)
         return std::nullopt;
     std::size_t const lenA = cmpt::RangeProof::serializedSize(bitsA);
     if (rem <= lenA)
@@ -110,6 +99,8 @@ parseSendProofs(Slice const& in, bool hasAuditor)
     auto ra = cmpt::RangeProof::deserialize(sub(off, lenA));
     auto rb = cmpt::RangeProof::deserialize(sub(off + lenA, rem - lenA));
     if (!ra || !rb)
+        return std::nullopt;
+    if (ra->bits() != kSendRangeBits || rb->bits() != kSendRangeBits)
         return std::nullopt;
     p.rangeAmount = *ra;
     p.rangeBalance = *rb;
@@ -238,14 +229,14 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
     auto const balanceCommit =
         *cmpt::PedersenCommitment::deserialize(ctx.tx[sfBalanceCommitment]);
 
-    auto const proofs = parseSendProofs(ctx.tx[sfZKProof], hasAuditor);
+    auto const proofs = parseSendProofs(ctx.tx[sfZKProof]);
     if (!proofs)
         return tecBAD_PROOF;
 
-    // Bind every proof in the bundle to this transaction's context_id. The
-    // version is the sender's pre-transaction confidential balance version
-    // (bumped in doApply); getSeqValue() binds ticketed transactions to their
-    // ticket number rather than sfSequence == 0.
+    // Bind the proof bundle to this transaction's context_id. The version is
+    // the sender's pre-transaction confidential balance version (bumped in
+    // doApply); getSeqValue() binds ticketed transactions to their ticket
+    // number rather than sfSequence == 0.
     std::uint32_t const version =
         sleSender->isFieldPresent(sfConfidentialBalanceVersion)
         ? sleSender->getFieldU32(sfConfidentialBalanceVersion)
@@ -254,33 +245,45 @@ ConfidentialMPTSend::preclaim(PreclaimContext const& ctx)
         ctx.tx[sfAccount], id, ctx.tx.getSeqValue(), dest, version);
     Slice const ctxId{contextId.data(), contextId.size()};
 
-    // Ciphertext consistency across the recipient / mirror ciphertexts.
-    if (!proofs->peqDest.verify(senderKey, destKey, senderCt, destCt, ctxId) ||
-        !proofs->peqIssuer.verify(
-            senderKey, issuerKey, senderCt, issuerCt, ctxId))
-        return tecBAD_PROOF;
-
+    // Assemble the recipient mirrors [sender, dest, issuer, (auditor)]. The
+    // compact proof binds them under a single shared ciphertext nonce C1 and
+    // rejects mismatched nonces, so every mirror must share senderCt.c1().
+    std::vector<cmpt::ElGamalPublicKey> recipientKeys{
+        senderKey, destKey, issuerKey};
+    std::vector<cmpt::ElGamalCiphertext> recipientCts{
+        senderCt, destCt, issuerCt};
     if (hasAuditor)
     {
         auto const auditorKey = loadPoint(*sleIssuance, sfAuditorEncryptionKey);
-        auto const auditorCt =
-            *cmpt::ElGamalCiphertext::deserialize(ctx.tx[sfAuditorEncryptedAmount]);
-        if (auditorKey.isInfinity() || !proofs->peqAuditor ||
-            !proofs->peqAuditor->verify(
-                senderKey, auditorKey, senderCt, auditorCt, ctxId))
+        auto const auditorCt = *cmpt::ElGamalCiphertext::deserialize(
+            ctx.tx[sfAuditorEncryptedAmount]);
+        if (auditorKey.isInfinity())
             return tecBAD_PROOF;
+        recipientKeys.push_back(auditorKey);
+        recipientCts.push_back(auditorCt);
     }
 
-    // Amount linkage + range proof on the transferred amount.
-    if (!proofs->linkAmount.verify(senderKey, senderCt, amountCommit, ctxId) ||
-        !proofs->rangeAmount.verify(amountCommit, ctxId))
-        return tecBAD_PROOF;
-
-    // Balance linkage + range proof on the post-debit spending balance
-    // (proves the remaining confidential balance is non-negative).
+    // Post-debit spending balance: its range proof bounds the remaining
+    // confidential balance to [0, 2^63), and the compact proof binds its
+    // ownership to the sender's key.
     auto const postDebit =
         loadCt(*sleSender, sfConfidentialBalanceSpending) - senderCt;
-    if (!proofs->linkBalance.verify(senderKey, postDebit, balanceCommit, ctxId) ||
+
+    // Single compact AND-composed sigma proof: ciphertext equality across every
+    // mirror, amount-commitment linkage, and post-debit balance ownership.
+    if (!proofs->standard.verify(
+            recipientKeys,
+            recipientCts,
+            amountCommit,
+            senderKey,
+            postDebit,
+            balanceCommit,
+            ctxId))
+        return tecBAD_PROOF;
+
+    // Range proofs: the transferred amount and the remaining spending balance
+    // both lie in [0, 2^63).
+    if (!proofs->rangeAmount.verify(amountCommit, ctxId) ||
         !proofs->rangeBalance.verify(balanceCommit, ctxId))
         return tecBAD_PROOF;
 

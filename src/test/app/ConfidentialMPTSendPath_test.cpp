@@ -15,7 +15,9 @@
 #include <xrpl/protocol/jss.h>
 
 #include <cstdint>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace xrpl::test {
 
@@ -178,7 +180,8 @@ private:
         cmpt::ECPoint const& issuerPub,
         cmpt::ElGamalCiphertext const& senderSpending,
         std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt,
-        std::optional<std::uint32_t> seqOverride = std::nullopt);
+        std::optional<std::uint32_t> seqOverride = std::nullopt,
+        std::uint8_t rangeBits = 63);
 
     static cmpt::ElGamalCiphertext
     readSpending(jtx::Env& env, MPTID const& id, jtx::Account const& a);
@@ -209,7 +212,8 @@ ConfidentialMPTSendPath_test::sendJV(
     cmpt::ECPoint const& issuerPub,
     cmpt::ElGamalCiphertext const& senderSpending,
     std::optional<cmpt::ECPoint> const& auditorPub,
-    std::optional<std::uint32_t> seqOverride)
+    std::optional<std::uint32_t> seqOverride,
+    std::uint8_t rangeBits)
 {
     using namespace cmpt;
 
@@ -227,53 +231,54 @@ ConfidentialMPTSendPath_test::sendJV(
         cmpt::sendContextId(from.id(), id, seqValue, to.id(), version);
     Slice const ctxId{contextId.data(), contextId.size()};
 
-    Scalar const kt = Scalar::random();
-    Scalar const kd = Scalar::random();
-    Scalar const ki = Scalar::random();
-    auto const senderCt = ElGamalCiphertext::encrypt(senderPub, amount, kt);
-    auto const destCt = ElGamalCiphertext::encrypt(destPub, amount, kd);
-    auto const issuerCt = ElGamalCiphertext::encrypt(issuerPub, amount, ki);
+    // Shared-randomness model: every recipient mirror reuses one ciphertext
+    // nonce r, so all share C1 = r*G. The amount commitment's blinding factor
+    // is that same r (PC_m = m*G + r*H), as the compact proof requires.
+    Scalar const r = Scalar::random();
+    auto const senderCt = ElGamalCiphertext::encrypt(senderPub, amount, r);
+    auto const destCt = ElGamalCiphertext::encrypt(destPub, amount, r);
+    auto const issuerCt = ElGamalCiphertext::encrypt(issuerPub, amount, r);
 
-    Scalar const ra = Scalar::random();
     auto const [rangeAmount, amountCommit] =
-        RangeProof::prove(amount, ra, 63, ctxId);
-    auto const linkAmount = LinkageProof::prove(
-        senderSecret, amount, ra, senderCt, amountCommit, ctxId);
+        RangeProof::prove(amount, r, rangeBits, ctxId);
 
     auto const postDebit = senderSpending - senderCt;
-    Scalar const rb = Scalar::random();
+    Scalar const rho = Scalar::random();
     auto const [rangeBalance, balanceCommit] =
-        RangeProof::prove(remaining, rb, 63, ctxId);
-    auto const linkBalance = LinkageProof::prove(
-        senderSecret, remaining, rb, postDebit, balanceCommit, ctxId);
+        RangeProof::prove(remaining, rho, rangeBits, ctxId);
 
-    auto const peqDest = PlaintextEqualityProof::prove(
-        senderPub, destPub, amount, kt, kd, senderCt, destCt, ctxId);
-    auto const peqIssuer = PlaintextEqualityProof::prove(
-        senderPub, issuerPub, amount, kt, ki, senderCt, issuerCt, ctxId);
+    // Recipient mirrors in the canonical order [sender, dest, issuer, ...].
+    std::vector<ElGamalPublicKey> recipientKeys{senderPub, destPub, issuerPub};
+    std::vector<ElGamalCiphertext> recipientCts{senderCt, destCt, issuerCt};
 
-    // Optional auditor mirror: a fresh ciphertext plus its equality proof,
-    // serialized between the issuer proof and the linkage proofs.
+    // Optional auditor mirror: a fresh ciphertext under the same shared r.
     std::optional<ElGamalCiphertext> auditorCt;
-    std::optional<PlaintextEqualityProof> peqAuditor;
     if (auditorPub)
     {
-        Scalar const ka = Scalar::random();
-        auditorCt = ElGamalCiphertext::encrypt(*auditorPub, amount, ka);
-        peqAuditor = PlaintextEqualityProof::prove(
-            senderPub, *auditorPub, amount, kt, ka, senderCt, *auditorCt, ctxId);
+        auditorCt = ElGamalCiphertext::encrypt(*auditorPub, amount, r);
+        recipientKeys.push_back(*auditorPub);
+        recipientCts.push_back(*auditorCt);
     }
+
+    auto const standard = CompactStandardProof::prove(
+        senderSecret,
+        amount,
+        remaining,
+        r,
+        rho,
+        recipientKeys,
+        recipientCts,
+        amountCommit,
+        senderPub,
+        postDebit,
+        balanceCommit,
+        ctxId);
 
     Blob bundle;
     auto append = [&](auto const& a) {
         bundle.insert(bundle.end(), a.begin(), a.end());
     };
-    append(peqDest.serialize());
-    append(peqIssuer.serialize());
-    if (peqAuditor)
-        append(peqAuditor->serialize());
-    append(linkAmount.serialize());
-    append(linkBalance.serialize());
+    append(standard.serialize());
     append(rangeAmount.serialize());
     append(rangeBalance.serialize());
 
@@ -548,6 +553,20 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         proof[0] ^= 0x01;
         jv[sfZKProof] = strHex(proof);
         env(jv, Ter(tecBAD_PROOF));
+    }
+
+    // Range proofs must be exactly 63-bit. A structurally valid bundle whose
+    // range proofs assert a wider [0, 2^64) bound is rejected, so the preclaim's
+    // [0, 2^63) guarantee on the amount and post-debit balance cannot be
+    // weakened by swapping in wider proofs.
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        env(sendJV(
+                env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub,
+                issuerPub, readSpending(env, id, bob), std::nullopt,
+                std::nullopt, 64),
+            Ter(tecBAD_PROOF));
     }
 
     // The bundle is bound to the transaction context_id (sender, issuance,

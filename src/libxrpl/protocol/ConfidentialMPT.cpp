@@ -1352,44 +1352,250 @@ CompactConvertBackProof::deserialize(Slice const& in)
 }
 
 //------------------------------------------------------------------------------
-// CompactStandardProof (stub for XLS-0096 Phase 1)
+// CompactStandardProof (mpt-crypto proof_compact_standard.c)
 //------------------------------------------------------------------------------
 
-// TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
-CompactStandardProof
-CompactStandardProof::prove(
-    Scalar const&,
-    std::uint64_t,
-    std::uint64_t,
-    Scalar const&,
-    Scalar const&,
-    Scalar const&,
-    ElGamalPublicKey const&,
-    ElGamalCiphertext const&,
-    ElGamalCiphertext const&,
-    PedersenCommitment const&,
-    PedersenCommitment const&)
+namespace {
+
+Slice
+domainStandard()
 {
-    return CompactStandardProof{};
+    return lit("CMPT_SEND_SIGMA");
 }
 
-// TODO(#14): implement compact AND-composed sigma (mpt-crypto proof_compact_standard.c)
+// Fiat-Shamir challenge for the compact standard send proof. `pts` lists the
+// statement points followed by the first-round commitments, in the exact order
+// the reference compute_compact_std_challenge() serializes them:
+//   pk_1..pk_n, pk_A, C1, C_{2,1}..C_{2,n}, PC_m, PC_b, B1, B2,
+//   T1, T_{2,1}..T_{2,n}, T_m, T_b, T_sk1, T_sk2
+// so the SHA-256 challenge matches mpt-crypto byte-for-byte and the two
+// implementations cross-verify.
+Scalar
+standardChallenge(std::vector<ECPoint> const& pts, Slice const& contextId)
+{
+    std::vector<std::array<std::uint8_t, kPointSize>> ser;
+    ser.reserve(pts.size());
+    for (auto const& p : pts)
+        ser.push_back(p.serialize());
+    std::vector<Slice> parts;
+    parts.reserve(ser.size());
+    for (auto const& s : ser)
+        parts.push_back(Slice{s.data(), s.size()});
+    return compactChallenge(domainStandard(), parts, contextId);
+}
+
+// Build the ordered challenge point list shared by prove() and verify(): the
+// statement (recipient keys, sender key, shared C1, mirror C2 values, amount
+// and balance commitments, balance ciphertext) followed by the six first-round
+// commitments.
+std::vector<ECPoint>
+standardPoints(
+    std::vector<ElGamalPublicKey> const& recipientKeys,
+    std::vector<ElGamalCiphertext> const& recipientCts,
+    ECPoint const& C1,
+    PedersenCommitment const& amountCommit,
+    ElGamalPublicKey const& senderKey,
+    ElGamalCiphertext const& postDebit,
+    PedersenCommitment const& balanceCommit,
+    ECPoint const& T1,
+    std::vector<ECPoint> const& T2,
+    ECPoint const& T_m,
+    ECPoint const& T_b,
+    ECPoint const& T_sk1,
+    ECPoint const& T_sk2)
+{
+    std::size_t const n = recipientKeys.size();
+    std::vector<ECPoint> pts;
+    pts.reserve(4 + 3 * n + 6);
+    for (auto const& pk : recipientKeys)
+        pts.push_back(pk);
+    pts.push_back(senderKey);
+    pts.push_back(C1);
+    for (auto const& ct : recipientCts)
+        pts.push_back(ct.c2());
+    pts.push_back(amountCommit.point());
+    pts.push_back(balanceCommit.point());
+    pts.push_back(postDebit.c1());
+    pts.push_back(postDebit.c2());
+    pts.push_back(T1);
+    for (auto const& t : T2)
+        pts.push_back(t);
+    pts.push_back(T_m);
+    pts.push_back(T_b);
+    pts.push_back(T_sk1);
+    pts.push_back(T_sk2);
+    return pts;
+}
+
+}  // namespace
+
+CompactStandardProof
+CompactStandardProof::prove(
+    Scalar const& secret,
+    std::uint64_t amount,
+    std::uint64_t balance,
+    Scalar const& rShared,
+    Scalar const& rho,
+    std::vector<ElGamalPublicKey> const& recipientKeys,
+    std::vector<ElGamalCiphertext> const& recipientCts,
+    PedersenCommitment const& amountCommit,
+    ElGamalPublicKey const& senderKey,
+    ElGamalCiphertext const& postDebit,
+    PedersenCommitment const& balanceCommit,
+    Slice const& contextId)
+{
+    std::size_t const n = recipientKeys.size();
+    if (n == 0 || recipientCts.size() != n)
+        Throw<std::runtime_error>(
+            "CompactStandardProof::prove: empty or mismatched recipients");
+    if (secret.isZero() || senderKey.isInfinity())
+        Throw<std::runtime_error>(
+            "CompactStandardProof::prove: identity/zero sender key");
+
+    // Every recipient mirror must share the single ElGamal nonce C1 = r*G.
+    ECPoint const C1 = recipientCts[0].c1();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (recipientKeys[i].isInfinity())
+            Throw<std::runtime_error>(
+                "CompactStandardProof::prove: identity recipient key");
+        if (recipientCts[i].c1() != C1)
+            Throw<std::runtime_error>(
+                "CompactStandardProof::prove: non-shared ciphertext nonce");
+    }
+
+    ECPoint const H = ECPoint::generatorH();
+    ECPoint const& B1 = postDebit.c1();
+    Scalar const m(amount);
+    Scalar const b(balance);
+
+    // Nonces: w_r (r), w_m (m), w_sk (sk_A), w_rho (rho), w_b (b).
+    Scalar const w_r = Scalar::random();
+    Scalar const w_m = Scalar::random();
+    Scalar const w_sk = Scalar::random();
+    Scalar const w_rho = Scalar::random();
+    Scalar const w_b = Scalar::random();
+
+    // First-round commitments (mirror the reference exactly):
+    //   T1     = w_r*G
+    //   T2_i   = w_r*pk_i + w_m*G
+    //   T_m    = w_m*G + w_r*H
+    //   T_sk1  = w_sk*G
+    //   T_b    = w_b*G + w_rho*H
+    //   T_sk2  = w_sk*B1 + w_b*G
+    ECPoint const T1 = ECPoint::mulBase(w_r);
+    std::vector<ECPoint> T2(n);
+    for (std::size_t i = 0; i < n; ++i)
+        T2[i] = ECPoint::mul(w_r, recipientKeys[i]) + ECPoint::mulBase(w_m);
+    ECPoint const T_m = ECPoint::mulBase(w_m) + ECPoint::mul(w_r, H);
+    ECPoint const T_sk1 = ECPoint::mulBase(w_sk);
+    ECPoint const T_b = ECPoint::mulBase(w_b) + ECPoint::mul(w_rho, H);
+    ECPoint const T_sk2 = ECPoint::mul(w_sk, B1) + ECPoint::mulBase(w_b);
+
+    Scalar const e = standardChallenge(
+        standardPoints(
+            recipientKeys,
+            recipientCts,
+            C1,
+            amountCommit,
+            senderKey,
+            postDebit,
+            balanceCommit,
+            T1,
+            T2,
+            T_m,
+            T_b,
+            T_sk1,
+            T_sk2),
+        contextId);
+
+    // Responses: z = w + e*witness.
+    Scalar const z_m = w_m + e * m;
+    Scalar const z_r = w_r + e * rShared;
+    Scalar const z_b = w_b + e * b;
+    Scalar const z_rho = w_rho + e * rho;
+    Scalar const z_sk = w_sk + e * secret;
+    return CompactStandardProof{e, z_m, z_r, z_b, z_rho, z_sk};
+}
+
 bool
 CompactStandardProof::verify(
-    ElGamalPublicKey const&,
-    ElGamalPublicKey const&,
-    ElGamalCiphertext const&,
-    ElGamalCiphertext const&,
-    PedersenCommitment const&,
-    PedersenCommitment const&) const
+    std::vector<ElGamalPublicKey> const& recipientKeys,
+    std::vector<ElGamalCiphertext> const& recipientCts,
+    PedersenCommitment const& amountCommit,
+    ElGamalPublicKey const& senderKey,
+    ElGamalCiphertext const& postDebit,
+    PedersenCommitment const& balanceCommit,
+    Slice const& contextId) const
 {
-    return false;
+    std::size_t const n = recipientKeys.size();
+    if (n == 0 || recipientCts.size() != n || senderKey.isInfinity())
+        return false;
+
+    // Every recipient mirror must share the single ElGamal nonce C1.
+    ECPoint const C1 = recipientCts[0].c1();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        if (recipientKeys[i].isInfinity())
+            return false;
+        if (recipientCts[i].c1() != C1)
+            return false;
+    }
+
+    ECPoint const H = ECPoint::generatorH();
+    ECPoint const& B1 = postDebit.c1();
+    ECPoint const& B2 = postDebit.c2();
+
+    // Reconstruct the first-round commitments:
+    //   T1     = z_r*G - e*C1
+    //   T2_i   = z_r*pk_i + z_m*G - e*C_{2,i}
+    //   T_m    = z_m*G + z_r*H - e*PC_m
+    //   T_sk1  = z_sk*G - e*pk_A
+    //   T_b    = z_b*G + z_rho*H - e*PC_b
+    //   T_sk2  = z_sk*B1 + z_b*G - e*B2
+    ECPoint const T1 = ECPoint::mulBase(zr_) - ECPoint::mul(e_, C1);
+    std::vector<ECPoint> T2(n);
+    for (std::size_t i = 0; i < n; ++i)
+        T2[i] = ECPoint::mul(zr_, recipientKeys[i]) + ECPoint::mulBase(zm_) -
+            ECPoint::mul(e_, recipientCts[i].c2());
+    ECPoint const T_m = ECPoint::mulBase(zm_) + ECPoint::mul(zr_, H) -
+        ECPoint::mul(e_, amountCommit.point());
+    ECPoint const T_sk1 = ECPoint::mulBase(zsk_) - ECPoint::mul(e_, senderKey);
+    ECPoint const T_b = ECPoint::mulBase(zb_) + ECPoint::mul(zrho_, H) -
+        ECPoint::mul(e_, balanceCommit.point());
+    ECPoint const T_sk2 = ECPoint::mul(zsk_, B1) + ECPoint::mulBase(zb_) -
+        ECPoint::mul(e_, B2);
+
+    Scalar const e = standardChallenge(
+        standardPoints(
+            recipientKeys,
+            recipientCts,
+            C1,
+            amountCommit,
+            senderKey,
+            postDebit,
+            balanceCommit,
+            T1,
+            T2,
+            T_m,
+            T_b,
+            T_sk1,
+            T_sk2),
+        contextId);
+    return e == e_;
 }
 
 std::array<std::uint8_t, CompactStandardProof::kSize>
 CompactStandardProof::serialize() const
 {
-    return data_;
+    std::array<std::uint8_t, kSize> out{};
+    std::memcpy(out.data(), e_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + kScalarSize, zm_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 2 * kScalarSize, zr_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 3 * kScalarSize, zb_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 4 * kScalarSize, zrho_.bytes().data(), kScalarSize);
+    std::memcpy(out.data() + 5 * kScalarSize, zsk_.bytes().data(), kScalarSize);
+    return out;
 }
 
 std::optional<CompactStandardProof>
@@ -1397,9 +1603,13 @@ CompactStandardProof::deserialize(Slice const& in)
 {
     if (in.size() != kSize)
         return std::nullopt;
-    CompactStandardProof proof;
-    std::memcpy(proof.data_.data(), in.data(), kSize);
-    return proof;
+    Scalar const e{Slice{in.data(), kScalarSize}};
+    Scalar const zm{Slice{in.data() + kScalarSize, kScalarSize}};
+    Scalar const zr{Slice{in.data() + 2 * kScalarSize, kScalarSize}};
+    Scalar const zb{Slice{in.data() + 3 * kScalarSize, kScalarSize}};
+    Scalar const zrho{Slice{in.data() + 4 * kScalarSize, kScalarSize}};
+    Scalar const zsk{Slice{in.data() + 5 * kScalarSize, kScalarSize}};
+    return CompactStandardProof{e, zm, zr, zb, zrho, zsk};
 }
 
 //------------------------------------------------------------------------------

@@ -44,12 +44,21 @@ validPoint(std::optional<Slice> const& s)
         cmpt::ECPoint::deserialize(*s).has_value();
 }
 
+// The transferred amount and the post-debit spending balance must both lie in
+// [0, 2^63). RangeProof is self-describing (its leading byte is the bit width)
+// and verify() checks the value only against that embedded width, so the wire
+// format pins the width here: a bundle carrying a wider (e.g. 64-bit) proof
+// would otherwise verify while asserting a weaker bound than this preclaim
+// relies on.
+constexpr std::uint8_t kSendRangeBits = 63;
+
 // Layout of the ZKProof bundle carried by ConfidentialMPTSend: a single
 // 192-byte compact AND-composed sigma proof (CompactStandardProof) binding
 // every recipient mirror under one shared ciphertext nonce, followed by two
 // logarithmic aggregated-Bulletproof range proofs (one for the transferred
 // amount, one for the remaining spending balance). Each range proof is
-// self-describing via its leading bit-width byte.
+// self-describing via its leading bit-width byte, which must be exactly
+// kSendRangeBits.
 struct SendProofs
 {
     cmpt::CompactStandardProof standard;
@@ -76,10 +85,13 @@ parseSendProofs(Slice const& in)
         return std::nullopt;
     p.standard = *sp;
 
-    // The two range proofs are self-describing: byte 0 is the bit width.
+    // The two range proofs are self-describing: byte 0 is the bit width. The
+    // wire format requires both to be exactly kSendRangeBits, so reject any
+    // other width up front (a wider proof would assert a weaker [0, 2^bits)
+    // bound than this preclaim depends on).
     std::size_t const rem = in.size() - off;
     std::uint8_t const bitsA = in.data()[off];
-    if (bitsA == 0 || bitsA > cmpt::RangeProof::kMaxBits)
+    if (bitsA != kSendRangeBits)
         return std::nullopt;
     std::size_t const lenA = cmpt::RangeProof::serializedSize(bitsA);
     if (rem <= lenA)
@@ -87,6 +99,8 @@ parseSendProofs(Slice const& in)
     auto ra = cmpt::RangeProof::deserialize(sub(off, lenA));
     auto rb = cmpt::RangeProof::deserialize(sub(off + lenA, rem - lenA));
     if (!ra || !rb)
+        return std::nullopt;
+    if (ra->bits() != kSendRangeBits || rb->bits() != kSendRangeBits)
         return std::nullopt;
     p.rangeAmount = *ra;
     p.rangeBalance = *rb;

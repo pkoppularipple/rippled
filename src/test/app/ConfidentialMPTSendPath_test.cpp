@@ -180,7 +180,8 @@ private:
         cmpt::ECPoint const& issuerPub,
         cmpt::ElGamalCiphertext const& senderSpending,
         std::optional<cmpt::ECPoint> const& auditorPub = std::nullopt,
-        std::optional<std::uint32_t> seqOverride = std::nullopt);
+        std::optional<std::uint32_t> seqOverride = std::nullopt,
+        std::uint8_t rangeBits = 63);
 
     static cmpt::ElGamalCiphertext
     readSpending(jtx::Env& env, MPTID const& id, jtx::Account const& a);
@@ -211,7 +212,8 @@ ConfidentialMPTSendPath_test::sendJV(
     cmpt::ECPoint const& issuerPub,
     cmpt::ElGamalCiphertext const& senderSpending,
     std::optional<cmpt::ECPoint> const& auditorPub,
-    std::optional<std::uint32_t> seqOverride)
+    std::optional<std::uint32_t> seqOverride,
+    std::uint8_t rangeBits)
 {
     using namespace cmpt;
 
@@ -238,12 +240,12 @@ ConfidentialMPTSendPath_test::sendJV(
     auto const issuerCt = ElGamalCiphertext::encrypt(issuerPub, amount, r);
 
     auto const [rangeAmount, amountCommit] =
-        RangeProof::prove(amount, r, 63, ctxId);
+        RangeProof::prove(amount, r, rangeBits, ctxId);
 
     auto const postDebit = senderSpending - senderCt;
     Scalar const rho = Scalar::random();
     auto const [rangeBalance, balanceCommit] =
-        RangeProof::prove(remaining, rho, 63, ctxId);
+        RangeProof::prove(remaining, rho, rangeBits, ctxId);
 
     // Recipient mirrors in the canonical order [sender, dest, issuer, ...].
     std::vector<ElGamalPublicKey> recipientKeys{senderPub, destPub, issuerPub};
@@ -551,6 +553,20 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         proof[0] ^= 0x01;
         jv[sfZKProof] = strHex(proof);
         env(jv, Ter(tecBAD_PROOF));
+    }
+
+    // Range proofs must be exactly 63-bit. A structurally valid bundle whose
+    // range proofs assert a wider [0, 2^64) bound is rejected, so the preclaim's
+    // [0, 2^63) guarantee on the amount and post-debit balance cannot be
+    // weakened by swapping in wider proofs.
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        env(sendJV(
+                env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub,
+                issuerPub, readSpending(env, id, bob), std::nullopt,
+                std::nullopt, 64),
+            Ter(tecBAD_PROOF));
     }
 
     // The bundle is bound to the transaction context_id (sender, issuance,

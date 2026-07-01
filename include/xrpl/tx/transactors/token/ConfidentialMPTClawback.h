@@ -18,14 +18,11 @@ namespace xrpl {
     the canonical encrypted zero and the spending-balance version is bumped.
 
     The revealed amount is proven correct against the holder's on-ledger
-    sfIssuerEncryptedBalance (issuer mirror): a linkage proof, verified through
-    knowledge of the issuer's secret key, binds that ciphertext to a Pedersen
-    commitment the verifier reconstructs from the disclosed sfMPTAmount and a
-    disclosed blinding factor, proving the mirror encrypts exactly sfMPTAmount.
-    No range proof is needed — the entire balance is burned and the remainder is
-    exactly encrypted zero. This is the same self-contained linear primitive the
-    earlier slices use; the succinct 64-byte compact-sigma encoding is deferred
-    to a later slice.
+    sfIssuerEncryptedBalance (issuer mirror) by a 64-byte compact-sigma clawback
+    proof, verified through knowledge of the issuer's secret key: it establishes
+    P_iss == sk_iss*G and C2 - sfMPTAmount*G == sk_iss*C1, proving the mirror
+    encrypts exactly sfMPTAmount. No range proof is needed — the entire balance
+    is burned and the remainder is exactly encrypted zero.
 */
 class ConfidentialMPTClawback : public Transactor
 {

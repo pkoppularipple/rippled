@@ -15,7 +15,7 @@
 #include <utility>
 #include <vector>
 
-// Verify mpt-crypto linkage: compact proof sizes match our stubs.
+// Verify mpt-crypto linkage: compact proof sizes match the reference library.
 static_assert(SECP256K1_POK_SK_PROOF_SIZE == 64);
 static_assert(SECP256K1_COMPACT_STANDARD_PROOF_SIZE == 192);
 static_assert(SECP256K1_COMPACT_CLAWBACK_PROOF_SIZE == 64);

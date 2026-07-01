@@ -239,13 +239,17 @@ ConfidentialMPTSendPath_test::sendJV(
     auto const destCt = ElGamalCiphertext::encrypt(destPub, amount, r);
     auto const issuerCt = ElGamalCiphertext::encrypt(issuerPub, amount, r);
 
-    auto const [rangeAmount, amountCommit] =
-        RangeProof::prove(amount, r, rangeBits, ctxId);
-
     auto const postDebit = senderSpending - senderCt;
     Scalar const rho = Scalar::random();
-    auto const [rangeBalance, balanceCommit] =
-        RangeProof::prove(remaining, rho, rangeBits, ctxId);
+
+    // Single aggregated Bulletproof over both values: the transfer amount
+    // (blinded by the shared nonce r, so its commitment is PC_m) and the
+    // remaining spending balance (blinded by rho). Commitment order is
+    // {amount, balance}, matching the verifier.
+    auto const [range, rangeCommits] = RangeProof::proveAggregated(
+        {amount, remaining}, {r, rho}, rangeBits, ctxId);
+    auto const& amountCommit = rangeCommits[0];
+    auto const& balanceCommit = rangeCommits[1];
 
     // Recipient mirrors in the canonical order [sender, dest, issuer, ...].
     std::vector<ElGamalPublicKey> recipientKeys{senderPub, destPub, issuerPub};
@@ -279,8 +283,7 @@ ConfidentialMPTSendPath_test::sendJV(
         bundle.insert(bundle.end(), a.begin(), a.end());
     };
     append(standard.serialize());
-    append(rangeAmount.serialize());
-    append(rangeBalance.serialize());
+    append(range.serializeAggregated());
 
     json::Value jv;
     jv[jss::TransactionType] = "ConfidentialMPTSend";
@@ -555,10 +558,42 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         env(jv, Ter(tecBAD_PROOF));
     }
 
-    // Range proofs must be exactly 63-bit. A structurally valid bundle whose
-    // range proofs assert a wider [0, 2^64) bound is rejected, so the preclaim's
-    // [0, 2^63) guarantee on the amount and post-debit balance cannot be
-    // weakened by swapping in wider proofs.
+    // A ZKProof bundle that is not exactly 946 bytes is rejected up front in
+    // preflight with temMALFORMED, before any proof verification. This guards
+    // against the legacy two-range-proof layout (~1570 bytes) or any other
+    // mis-sized bundle, and is distinct from the tecBAD_PROOF a same-size but
+    // tampered bundle produces.
+    {
+        Env env{*this, features};
+        auto const id = setup(env);
+        auto const jv = sendJV(
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob));
+        auto const proof = *strUnHex(jv[sfZKProof].asString());
+
+        // Truncated bundle (one byte short).
+        {
+            auto shortJv = jv;
+            auto shortProof = proof;
+            shortProof.pop_back();
+            shortJv[sfZKProof] = strHex(shortProof);
+            env(shortJv, Ter(temMALFORMED));
+        }
+
+        // Oversized bundle (one trailing byte, mimicking a wider layout).
+        {
+            auto longJv = jv;
+            auto longProof = proof;
+            longProof.push_back(0x00);
+            longJv[sfZKProof] = strHex(longProof);
+            env(longJv, Ter(temMALFORMED));
+        }
+    }
+
+    // The aggregated range proof must be exactly 63-bit. A structurally valid
+    // 946-byte bundle whose range proof asserts a wider [0, 2^64) bound is
+    // rejected, so the preclaim's [0, 2^63) guarantee on the amount and
+    // post-debit balance cannot be weakened by swapping in a wider proof.
     {
         Env env{*this, features};
         auto const id = setup(env);

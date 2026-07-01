@@ -288,6 +288,64 @@ public:
     static std::optional<RangeProof>
     deserialize(Slice const& in);
 
+    // --- Aggregated (multi-value) API ------------------------------------
+
+    /** Prove that each commit(values[j], blinds[j]) lies in [0, 2^bits) with a
+        single aggregated Bulletproof. `values` and `blinds` must have the same,
+        non-empty, power-of-two length. The optional 32-byte context_id binds
+        the proof to a single transaction, mirroring prove().
+
+        Aggregation shares one inner-product argument across all values, so the
+        proof grows with log2(numValues * bits) rather than linearly in the
+        value count. Used by ConfidentialMPTSend to prove the transfer amount
+        and the post-debit spending balance together (numValues == 2) in a
+        single 754-byte proof.
+
+        @return the proof together with the ordered commitments it proves.
+    */
+    static std::pair<RangeProof, std::vector<PedersenCommitment>>
+    proveAggregated(
+        std::vector<std::uint64_t> const& values,
+        std::vector<Scalar> const& blinds,
+        std::uint8_t bits,
+        Slice const& contextId = {});
+
+    /** Verify an aggregated proof against the ordered commitments it proves. */
+    [[nodiscard]] bool
+    verifyAggregated(
+        std::vector<PedersenCommitment> const& commitments,
+        Slice const& contextId = {}) const;
+
+    /// Number of values aggregated in this proof (1 for a single-value proof).
+    [[nodiscard]] std::uint8_t
+    values() const
+    {
+        return values_;
+    }
+
+    /// Inner-product recursion rounds for an aggregated proof.
+    static std::size_t
+    roundsAggregated(std::uint8_t bits, std::uint8_t numValues);
+
+    /// Exact serialized byte length of an aggregated proof (no width byte).
+    static std::size_t
+    serializedSizeAggregated(std::uint8_t bits, std::uint8_t numValues);
+
+    /** Serialize an aggregated proof.
+
+        Unlike serialize(), the aggregated wire format carries no leading width
+        byte: the bit width and value count are fixed by the transaction type
+        and supplied to deserializeAggregated() by the caller.
+    */
+    [[nodiscard]] std::vector<std::uint8_t>
+    serializeAggregated() const;
+
+    static std::optional<RangeProof>
+    deserializeAggregated(
+        Slice const& in,
+        std::uint8_t bits,
+        std::uint8_t numValues);
+
 private:
     std::uint8_t bits_{0};
     ECPoint a_;   // A: vector commitment to the value's bits
@@ -301,6 +359,7 @@ private:
     std::vector<ECPoint> ipR_;  // inner-product argument right commitments
     Scalar ipa_;                // folded inner-product scalar a
     Scalar ipb_;                // folded inner-product scalar b
+    std::uint8_t values_{1};    // number of aggregated values (1 = single-value)
 };
 
 //------------------------------------------------------------------------------

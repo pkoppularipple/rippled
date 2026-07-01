@@ -836,6 +836,464 @@ RangeProof::deserialize(Slice const& in)
 }
 
 //------------------------------------------------------------------------------
+// RangeProof: aggregated (multi-value) variant.
+//
+// An aggregated Bulletproof proves that m committed values each lie in
+// [0, 2^bits) while sharing a single inner-product argument over the
+// concatenated bit vectors (total width N = padTo(bits) * m). The math is the
+// exact generalization of the single-value path above: block j (0-indexed)
+// weights its 2^k vector and its value commitment V_j by z^{2+j}, delta(y,z)
+// subtracts sum_j z^{3+j} * <1, 2^bits>, and tauX aggregates sum_j z^{2+j} *
+// gamma_j. At m == 1 every formula collapses to the single-value case.
+//------------------------------------------------------------------------------
+
+std::size_t
+RangeProof::roundsAggregated(std::uint8_t bits, std::uint8_t numValues)
+{
+    return log2ceil(padTo(bits) * static_cast<std::size_t>(numValues));
+}
+
+std::size_t
+RangeProof::serializedSizeAggregated(std::uint8_t bits, std::uint8_t numValues)
+{
+    // No width byte: A,S,T1,T2 + tauX,mu,tHat + 2k IPA points + a,b.
+    return 4 * kPointSize + 3 * kScalarSize +
+        2 * roundsAggregated(bits, numValues) * kPointSize + 2 * kScalarSize;
+}
+
+std::pair<RangeProof, std::vector<PedersenCommitment>>
+RangeProof::proveAggregated(
+    std::vector<std::uint64_t> const& values,
+    std::vector<Scalar> const& blinds,
+    std::uint8_t bits,
+    Slice const& contextId)
+{
+    if (bits == 0 || bits > kMaxBits)
+        Throw<std::runtime_error>(
+            "RangeProof::proveAggregated: invalid bit width");
+    std::size_t const m = values.size();
+    if (m == 0 || m > 255 || blinds.size() != m || (m & (m - 1)) != 0)
+        Throw<std::runtime_error>(
+            "RangeProof::proveAggregated: value count must be a non-zero power "
+            "of two matching the blind count");
+
+    std::size_t const block = padTo(bits);  // padded per-value width
+    std::size_t const n = block * m;         // total (power-of-two) width
+
+    std::vector<PedersenCommitment> commitments;
+    commitments.reserve(m);
+    for (std::size_t j = 0; j < m; ++j)
+        commitments.push_back(PedersenCommitment::commit(values[j], blinds[j]));
+
+    Gens const gen = makeGens(n);
+    ECPoint const H = ECPoint::generatorH();
+    Scalar const one(std::uint64_t{1});
+
+    // aL = concatenation of each value's bit vector (padding bits stay zero, so
+    // each value is bounded by 2^bits rather than 2^block); aR = aL - 1.
+    std::vector<Scalar> aL(n), aR(n);
+    for (std::size_t j = 0; j < m; ++j)
+        for (std::size_t i = 0; i < block; ++i)
+        {
+            std::size_t const idx = j * block + i;
+            std::uint64_t const bit = (i < bits) ? ((values[j] >> i) & 1u) : 0u;
+            aL[idx] = Scalar(bit);
+            aR[idx] = aL[idx] - one;
+        }
+
+    std::vector<Scalar> sL(n), sR(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        sL[i] = Scalar::random();
+        sR[i] = Scalar::random();
+    }
+    Scalar const alpha = Scalar::random();
+    Scalar const rho = Scalar::random();
+
+    RangeProof proof;
+    proof.bits_ = bits;
+    proof.values_ = static_cast<std::uint8_t>(m);
+    proof.a_ = msm(aL, gen.g) + msm(aR, gen.h) + ECPoint::mul(alpha, H);
+    proof.s_ = msm(sL, gen.g) + msm(sR, gen.h) + ECPoint::mul(rho, H);
+
+    // Transcript: V_0..V_{m-1} || A || S [|| context_id]  ->  challenges y, z.
+    std::vector<std::uint8_t> t;
+    for (auto const& c : commitments)
+        absorb(t, c.point());
+    absorb(t, proof.a_);
+    absorb(t, proof.s_);
+    if (contextId.size())
+        t.insert(t.end(), contextId.data(), contextId.data() + contextId.size());
+    Slice const tSlice0{t.data(), t.size()};
+    Scalar const y = hashToScalar(rpDomain(), {tSlice0, lit("y")});
+    Scalar const z = hashToScalar(rpDomain(), {tSlice0, lit("z")});
+
+    // Global y^i across the full width; a single-block 2^k table (reset per
+    // block, zero in padding); per-block z power zBlock[j] = z^{2+j}.
+    std::vector<Scalar> yPow(n);
+    yPow[0] = one;
+    for (std::size_t i = 1; i < n; ++i)
+        yPow[i] = yPow[i - 1] * y;
+    Scalar const two(std::uint64_t{2});
+    std::vector<Scalar> twoPowBlock(block);
+    twoPowBlock[0] = one;
+    for (std::size_t i = 1; i < bits; ++i)
+        twoPowBlock[i] = twoPowBlock[i - 1] * two;
+    Scalar const z2 = z * z;
+    std::vector<Scalar> zBlock(m);
+    zBlock[0] = z2;
+    for (std::size_t j = 1; j < m; ++j)
+        zBlock[j] = zBlock[j - 1] * z;
+
+    // l(X) = (aL - z*1) + sL*X ; r(X) = y o (aR + z*1 + sR*X) + z^{2+j} 2^k.
+    std::vector<Scalar> l0(n), l1(n), r0(n), r1(n);
+    for (std::size_t j = 0; j < m; ++j)
+        for (std::size_t i = 0; i < block; ++i)
+        {
+            std::size_t const idx = j * block + i;
+            l0[idx] = aL[idx] - z;
+            l1[idx] = sL[idx];
+            r0[idx] = yPow[idx] * (aR[idx] + z) + zBlock[j] * twoPowBlock[i];
+            r1[idx] = yPow[idx] * sR[idx];
+        }
+
+    Scalar const t1c = inner(l0, r1) + inner(l1, r0);
+    Scalar const t2c = inner(l1, r1);
+    Scalar const tau1 = Scalar::random();
+    Scalar const tau2 = Scalar::random();
+    proof.t1_ = PedersenCommitment::commit(t1c, tau1).point();
+    proof.t2_ = PedersenCommitment::commit(t2c, tau2).point();
+
+    absorb(t, proof.t1_);
+    absorb(t, proof.t2_);
+    Slice const tSlice1{t.data(), t.size()};
+    Scalar const x = hashToScalar(rpDomain(), {tSlice1, lit("x")});
+
+    std::vector<Scalar> lv(n), rv(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        lv[i] = l0[i] + l1[i] * x;
+        rv[i] = r0[i] + r1[i] * x;
+    }
+    proof.tHat_ = inner(lv, rv);
+    // tauX = sum_j z^{2+j} * gamma_j + tau1*x + tau2*x^2.
+    Scalar tauX;
+    for (std::size_t j = 0; j < m; ++j)
+        tauX = tauX + zBlock[j] * blinds[j];
+    proof.tauX_ = tauX + tau1 * x + tau2 * (x * x);
+    proof.mu_ = alpha + rho * x;
+
+    // Inner-product argument over (lv, rv), identical to the single-value path.
+    auto const yInv = y.invert();
+    if (!yInv)
+        Throw<std::runtime_error>(
+            "RangeProof::proveAggregated: non-invertible y");
+    std::vector<ECPoint> gv = gen.g;
+    std::vector<ECPoint> hv(n);
+    Scalar yInvPow = one;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        hv[i] = ECPoint::mul(yInvPow, gen.h[i]);
+        yInvPow = yInvPow * *yInv;
+    }
+
+    absorb(t, proof.tHat_);
+    Slice const tSlice2{t.data(), t.size()};
+    Scalar const w = hashToScalar(rpDomain(), {tSlice2, lit("w")});
+    ECPoint const U = ECPoint::mul(w, gen.u);
+
+    std::vector<Scalar> a = lv;
+    std::vector<Scalar> b = rv;
+    std::vector<std::uint8_t> tip = t;
+
+    std::size_t cur = n;
+    while (cur > 1)
+    {
+        std::size_t const half = cur / 2;
+        std::vector<Scalar> aLo(a.begin(), a.begin() + half);
+        std::vector<Scalar> aHi(a.begin() + half, a.begin() + cur);
+        std::vector<Scalar> bLo(b.begin(), b.begin() + half);
+        std::vector<Scalar> bHi(b.begin() + half, b.begin() + cur);
+        std::vector<ECPoint> gLo(gv.begin(), gv.begin() + half);
+        std::vector<ECPoint> gHi(gv.begin() + half, gv.begin() + cur);
+        std::vector<ECPoint> hLo(hv.begin(), hv.begin() + half);
+        std::vector<ECPoint> hHi(hv.begin() + half, hv.begin() + cur);
+
+        Scalar const cL = inner(aLo, bHi);
+        Scalar const cR = inner(aHi, bLo);
+        ECPoint const L = msm(aLo, gHi) + msm(bHi, hLo) + ECPoint::mul(cL, U);
+        ECPoint const R = msm(aHi, gLo) + msm(bLo, hHi) + ECPoint::mul(cR, U);
+        proof.ipL_.push_back(L);
+        proof.ipR_.push_back(R);
+
+        absorb(tip, L);
+        absorb(tip, R);
+        Scalar const u = hashToScalar(
+            rpDomain(), {Slice{tip.data(), tip.size()}, lit("u")});
+        auto const uInv = u.invert();
+        if (!uInv)
+            Throw<std::runtime_error>(
+                "RangeProof::proveAggregated: non-invertible u");
+
+        std::vector<Scalar> aNew(half), bNew(half);
+        std::vector<ECPoint> gNew(half), hNew(half);
+        for (std::size_t i = 0; i < half; ++i)
+        {
+            aNew[i] = aLo[i] * u + aHi[i] * *uInv;
+            bNew[i] = bLo[i] * *uInv + bHi[i] * u;
+            gNew[i] = ECPoint::mul(*uInv, gLo[i]) + ECPoint::mul(u, gHi[i]);
+            hNew[i] = ECPoint::mul(u, hLo[i]) + ECPoint::mul(*uInv, hHi[i]);
+        }
+        a = std::move(aNew);
+        b = std::move(bNew);
+        gv = std::move(gNew);
+        hv = std::move(hNew);
+        cur = half;
+    }
+
+    proof.ipa_ = a[0];
+    proof.ipb_ = b[0];
+    return {proof, commitments};
+}
+
+bool
+RangeProof::verifyAggregated(
+    std::vector<PedersenCommitment> const& commitments,
+    Slice const& contextId) const
+{
+    if (bits_ == 0 || bits_ > kMaxBits)
+        return false;
+    std::size_t const m = commitments.size();
+    if (m == 0 || m != values_ || (m & (m - 1)) != 0)
+        return false;
+    std::size_t const block = padTo(bits_);
+    std::size_t const n = block * m;
+    std::size_t const k = log2ceil(n);
+    if (ipL_.size() != k || ipR_.size() != k)
+        return false;
+
+    Gens const gen = makeGens(n);
+    ECPoint const H = ECPoint::generatorH();
+    Scalar const one(std::uint64_t{1});
+
+    // Recompute y, z, x from V_0..V_{m-1} || A || S [|| context_id] || T1 || T2.
+    std::vector<std::uint8_t> t;
+    for (auto const& c : commitments)
+        absorb(t, c.point());
+    absorb(t, a_);
+    absorb(t, s_);
+    if (contextId.size())
+        t.insert(t.end(), contextId.data(), contextId.data() + contextId.size());
+    Slice const tSlice0{t.data(), t.size()};
+    Scalar const y = hashToScalar(rpDomain(), {tSlice0, lit("y")});
+    Scalar const z = hashToScalar(rpDomain(), {tSlice0, lit("z")});
+
+    absorb(t, t1_);
+    absorb(t, t2_);
+    Slice const tSlice1{t.data(), t.size()};
+    Scalar const x = hashToScalar(rpDomain(), {tSlice1, lit("x")});
+
+    std::vector<Scalar> yPow(n);
+    yPow[0] = one;
+    for (std::size_t i = 1; i < n; ++i)
+        yPow[i] = yPow[i - 1] * y;
+    Scalar const two(std::uint64_t{2});
+    std::vector<Scalar> twoPowBlock(block);
+    twoPowBlock[0] = one;
+    for (std::size_t i = 1; i < bits_; ++i)
+        twoPowBlock[i] = twoPowBlock[i - 1] * two;
+    Scalar const z2 = z * z;
+    std::vector<Scalar> zBlock(m);
+    zBlock[0] = z2;
+    for (std::size_t j = 1; j < m; ++j)
+        zBlock[j] = zBlock[j - 1] * z;
+
+    // sum_i y^i (full width) and sum_k 2^k (one block's meaningful bits).
+    Scalar sumY;
+    for (std::size_t i = 0; i < n; ++i)
+        sumY = sumY + yPow[i];
+    Scalar sumTwoBlock;
+    for (std::size_t i = 0; i < bits_; ++i)
+        sumTwoBlock = sumTwoBlock + twoPowBlock[i];
+
+    // delta(y,z) = (z - z^2) sum y^i - sum_j z^{3+j} <1, 2^bits>.
+    Scalar delta = (z - z2) * sumY;
+    for (std::size_t j = 0; j < m; ++j)
+        delta = delta - (zBlock[j] * z) * sumTwoBlock;
+
+    // t-poly opening: tHat*G + tauX*H == sum_j z^{2+j} V_j + delta*G + x T1 +
+    // x^2 T2.
+    ECPoint const lhsT = ECPoint::mulBase(tHat_) + ECPoint::mul(tauX_, H);
+    ECPoint rhsT = ECPoint::mulBase(delta) + ECPoint::mul(x, t1_) +
+        ECPoint::mul(x * x, t2_);
+    for (std::size_t j = 0; j < m; ++j)
+        rhsT = rhsT + ECPoint::mul(zBlock[j], commitments[j].point());
+    if (lhsT != rhsT)
+        return false;
+
+    // Rebuild h'_i = y^{-i} o h_i.
+    auto const yInv = y.invert();
+    if (!yInv)
+        return false;
+    std::vector<ECPoint> gv = gen.g;
+    std::vector<ECPoint> hv(n);
+    Scalar yInvPow = one;
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        hv[i] = ECPoint::mul(yInvPow, gen.h[i]);
+        yInvPow = yInvPow * *yInv;
+    }
+
+    absorb(t, tHat_);
+    Slice const tSlice2{t.data(), t.size()};
+    Scalar const w = hashToScalar(rpDomain(), {tSlice2, lit("w")});
+    ECPoint const U = ECPoint::mul(w, gen.u);
+
+    // P = A + x*S - mu*H + sum_i (-z) g_i + sum_i (z y^i + z^{2+j} 2^k) h'_i +
+    //     tHat*U.
+    std::vector<Scalar> gExp(n);
+    std::vector<Scalar> hExp(n);
+    for (std::size_t j = 0; j < m; ++j)
+        for (std::size_t i = 0; i < block; ++i)
+        {
+            std::size_t const idx = j * block + i;
+            gExp[idx] = z.negate();
+            hExp[idx] = z * yPow[idx] + zBlock[j] * twoPowBlock[i];
+        }
+    ECPoint P = a_ + ECPoint::mul(x, s_) + ECPoint::mul(mu_.negate(), H) +
+        msm(gExp, gv) + msm(hExp, hv) + ECPoint::mul(tHat_, U);
+
+    // Replay IPA rounds (identical to the single-value verifier).
+    std::vector<std::uint8_t> tip = t;
+    std::vector<Scalar> uChal(ipL_.size());
+    std::vector<Scalar> uInvChal(ipL_.size());
+    for (std::size_t r = 0; r < ipL_.size(); ++r)
+    {
+        absorb(tip, ipL_[r]);
+        absorb(tip, ipR_[r]);
+        Scalar const u = hashToScalar(
+            rpDomain(), {Slice{tip.data(), tip.size()}, lit("u")});
+        auto const uInv = u.invert();
+        if (!uInv)
+            return false;
+        uChal[r] = u;
+        uInvChal[r] = *uInv;
+    }
+
+    std::vector<Scalar> sVec(n);
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        Scalar prod = one;
+        for (std::size_t j = 0; j < k; ++j)
+        {
+            std::size_t const bitMask = std::size_t{1} << (k - 1 - j);
+            bool const hi = (i & bitMask) != 0;
+            prod = prod * (hi ? uChal[j] : uInvChal[j]);
+        }
+        sVec[i] = prod;
+    }
+
+    ECPoint gStar = ECPoint::infinity();
+    ECPoint hStar = ECPoint::infinity();
+    for (std::size_t i = 0; i < n; ++i)
+    {
+        gStar = gStar + ECPoint::mul(sVec[i], gv[i]);
+        Scalar const sInv = sVec[i].invert().value_or(Scalar());
+        hStar = hStar + ECPoint::mul(sInv, hv[i]);
+    }
+
+    ECPoint Pfold = P;
+    for (std::size_t r = 0; r < k; ++r)
+    {
+        Scalar const u2 = uChal[r] * uChal[r];
+        Scalar const u2Inv = uInvChal[r] * uInvChal[r];
+        Pfold = Pfold + ECPoint::mul(u2, ipL_[r]) + ECPoint::mul(u2Inv, ipR_[r]);
+    }
+
+    ECPoint const rhs = ECPoint::mul(ipa_, gStar) +
+        ECPoint::mul(ipb_, hStar) + ECPoint::mul(ipa_ * ipb_, U);
+    return Pfold == rhs;
+}
+
+std::vector<std::uint8_t>
+RangeProof::serializeAggregated() const
+{
+    std::vector<std::uint8_t> out;
+    out.reserve(serializedSizeAggregated(bits_, values_));
+    for (ECPoint const* p : {&a_, &s_, &t1_, &t2_})
+    {
+        auto const b = p->serialize();
+        out.insert(out.end(), b.begin(), b.end());
+    }
+    for (Scalar const* s : {&tauX_, &mu_, &tHat_})
+        out.insert(out.end(), s->bytes().begin(), s->bytes().end());
+    for (auto const& L : ipL_)
+    {
+        auto const b = L.serialize();
+        out.insert(out.end(), b.begin(), b.end());
+    }
+    for (auto const& R : ipR_)
+    {
+        auto const b = R.serialize();
+        out.insert(out.end(), b.begin(), b.end());
+    }
+    out.insert(out.end(), ipa_.bytes().begin(), ipa_.bytes().end());
+    out.insert(out.end(), ipb_.bytes().begin(), ipb_.bytes().end());
+    return out;
+}
+
+std::optional<RangeProof>
+RangeProof::deserializeAggregated(
+    Slice const& in,
+    std::uint8_t bits,
+    std::uint8_t numValues)
+{
+    if (bits == 0 || bits > kMaxBits || numValues == 0 ||
+        (numValues & (numValues - 1)) != 0)
+        return std::nullopt;
+    if (in.size() != serializedSizeAggregated(bits, numValues))
+        return std::nullopt;
+
+    RangeProof proof;
+    proof.bits_ = bits;
+    proof.values_ = numValues;
+    std::size_t off = 0;
+
+    auto readPoint = [&](ECPoint& dst) -> bool {
+        auto const p = ECPoint::deserialize(Slice{in.data() + off, kPointSize});
+        if (!p)
+            return false;
+        dst = *p;
+        off += kPointSize;
+        return true;
+    };
+    auto readScalar = [&](Scalar& dst) {
+        dst = Scalar{Slice{in.data() + off, kScalarSize}};
+        off += kScalarSize;
+    };
+
+    if (!readPoint(proof.a_) || !readPoint(proof.s_) ||
+        !readPoint(proof.t1_) || !readPoint(proof.t2_))
+        return std::nullopt;
+    readScalar(proof.tauX_);
+    readScalar(proof.mu_);
+    readScalar(proof.tHat_);
+
+    std::size_t const k = roundsAggregated(bits, numValues);
+    proof.ipL_.resize(k);
+    proof.ipR_.resize(k);
+    for (std::size_t i = 0; i < k; ++i)
+        if (!readPoint(proof.ipL_[i]))
+            return std::nullopt;
+    for (std::size_t i = 0; i < k; ++i)
+        if (!readPoint(proof.ipR_[i]))
+            return std::nullopt;
+    readScalar(proof.ipa_);
+    readScalar(proof.ipb_);
+    return proof;
+}
+
+//------------------------------------------------------------------------------
 // LinkageProof (secret-key ElGamal <-> Pedersen linkage)
 //------------------------------------------------------------------------------
 

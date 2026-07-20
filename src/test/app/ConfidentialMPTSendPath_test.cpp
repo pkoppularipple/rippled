@@ -1,5 +1,6 @@
 #include <test/jtx.h>
 #include <test/jtx/credentials.h>
+#include <test/jtx/delegate.h>
 #include <test/jtx/deposit.h>
 #include <test/jtx/mpt.h>
 
@@ -153,6 +154,7 @@ public:
         testConvertSuccess(all);
         testMergeInbox(all);
         testSend(all);
+        testNonDelegable(all);
         testDepositAuth(all);
     }
 
@@ -163,6 +165,8 @@ private:
     testMergeInbox(FeatureBitset features);
     void
     testSend(FeatureBitset features);
+    void
+    testNonDelegable(FeatureBitset features);
     void
     testDepositAuth(FeatureBitset features);
 
@@ -185,7 +189,141 @@ private:
 
     static cmpt::ElGamalCiphertext
     readSpending(jtx::Env& env, MPTID const& id, jtx::Account const& a);
+
+    // Read a holder's issuer-mirror confidential balance ciphertext (or the
+    // encryption of zero when the field is absent).
+    static cmpt::ElGamalCiphertext
+    readIssuerMirror(jtx::Env& env, MPTID const& id, jtx::Account const& a);
+
+    // Build a ConfidentialMPTConvertBack JSON (compact balance proof + 63-bit
+    // range proof), mirroring the dedicated ConvertBack suite's builder.
+    static json::Value
+    convertBackJV(
+        jtx::Env& env,
+        jtx::Account const& account,
+        MPTID const& id,
+        std::uint64_t amount,
+        std::uint64_t remaining,
+        cmpt::Scalar const& holderSecret,
+        cmpt::ECPoint const& holderPub,
+        cmpt::ECPoint const& issuerPub,
+        cmpt::ElGamalCiphertext const& spending);
+
+    // Build a ConfidentialMPTClawback JSON (compact clawback proof), mirroring
+    // the dedicated Clawback suite's builder.
+    static json::Value
+    clawbackJV(
+        jtx::Env& env,
+        jtx::Account const& issuer,
+        jtx::Account const& holder,
+        MPTID const& id,
+        std::uint64_t amount,
+        cmpt::Scalar const& issuerSecret,
+        cmpt::ElGamalCiphertext const& issuerMirror);
 };
+
+cmpt::ElGamalCiphertext
+ConfidentialMPTSendPath_test::readIssuerMirror(
+    jtx::Env& env,
+    MPTID const& id,
+    jtx::Account const& a)
+{
+    auto const sle = env.le(keylet::mptoken(id, a.id()));
+    if (sle && sle->isFieldPresent(sfIssuerEncryptedBalance))
+    {
+        auto const b = sle->getFieldVL(sfIssuerEncryptedBalance);
+        if (auto ct = cmpt::ElGamalCiphertext::deserialize(Slice{b.data(), b.size()}))
+            return *ct;
+    }
+    return cmpt::ElGamalCiphertext::encryptZero();
+}
+
+json::Value
+ConfidentialMPTSendPath_test::convertBackJV(
+    jtx::Env& env,
+    jtx::Account const& account,
+    MPTID const& id,
+    std::uint64_t amount,
+    std::uint64_t remaining,
+    cmpt::Scalar const& holderSecret,
+    cmpt::ECPoint const& holderPub,
+    cmpt::ECPoint const& issuerPub,
+    cmpt::ElGamalCiphertext const& spending)
+{
+    using namespace cmpt;
+    Scalar const k = Scalar::random();
+    auto const holderCt = ElGamalCiphertext::encrypt(holderPub, amount, k);
+    auto const issuerCt = ElGamalCiphertext::encrypt(issuerPub, amount, k);
+
+    auto const postDebit = spending - holderCt;
+    Scalar const rb = Scalar::random();
+    auto const [rangeBalance, balanceCommit] = RangeProof::prove(remaining, rb, 63);
+    std::uint32_t version = 0;
+    if (auto const sle = env.le(keylet::mptoken(id, account.id()));
+        sle && sle->isFieldPresent(sfConfidentialBalanceVersion))
+        version = sle->getFieldU32(sfConfidentialBalanceVersion);
+    auto const contextId =
+        convertBackContextId(account.id(), id, env.seq(account), version);
+    auto const compactBalance = CompactConvertBackProof::prove(
+        holderSecret,
+        remaining,
+        rb,
+        holderPub,
+        postDebit,
+        balanceCommit,
+        Slice{contextId.data(), contextId.size()});
+
+    Blob bundle;
+    auto append = [&](auto const& a) {
+        bundle.insert(bundle.end(), a.begin(), a.end());
+    };
+    append(compactBalance.serialize());
+    auto const rangeBytes = rangeBalance.serialize();
+    bundle.insert(bundle.end(), rangeBytes.begin() + 1, rangeBytes.end());
+
+    json::Value jv;
+    jv[jss::TransactionType] = "ConfidentialMPTConvertBack";
+    jv[jss::Account] = account.human();
+    jv[sfMPTokenIssuanceID] = to_string(id);
+    jv[sfMPTAmount] = std::to_string(amount);
+    jv[sfHolderEncryptedAmount] = hexOf(holderCt.serialize());
+    jv[sfIssuerEncryptedAmount] = hexOf(issuerCt.serialize());
+    jv[sfBlindingFactor] = hexOf(k.bytes());
+    jv[sfBalanceCommitment] = hexOf(balanceCommit.serialize());
+    jv[sfZKProof] = strHex(bundle);
+    return jv;
+}
+
+json::Value
+ConfidentialMPTSendPath_test::clawbackJV(
+    jtx::Env& env,
+    jtx::Account const& issuer,
+    jtx::Account const& holder,
+    MPTID const& id,
+    std::uint64_t amount,
+    cmpt::Scalar const& issuerSecret,
+    cmpt::ElGamalCiphertext const& issuerMirror)
+{
+    using namespace cmpt;
+    auto const issuerPub = ECPoint::mulBase(issuerSecret);
+    auto const contextId =
+        clawbackContextId(issuer.id(), id, env.seq(issuer), holder.id());
+    auto const proof = CompactClawbackProof::prove(
+        issuerSecret,
+        amount,
+        issuerPub,
+        issuerMirror,
+        Slice{contextId.data(), contextId.size()});
+
+    json::Value jv;
+    jv[jss::TransactionType] = "ConfidentialMPTClawback";
+    jv[jss::Account] = issuer.human();
+    jv[sfHolder] = holder.human();
+    jv[sfMPTokenIssuanceID] = to_string(id);
+    jv[sfMPTAmount] = std::to_string(amount);
+    jv[sfZKProof] = hexOf(proof.serialize());
+    return jv;
+}
 
 cmpt::ElGamalCiphertext
 ConfidentialMPTSendPath_test::readSpending(
@@ -729,6 +867,91 @@ ConfidentialMPTSendPath_test::testSend(FeatureBitset features)
         jv[sfCredentialIDs.jsonName].append("ABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCDABCD");
         env(jv, Ter(temDISABLED));
     }
+}
+
+void
+ConfidentialMPTSendPath_test::testNonDelegable(FeatureBitset features)
+{
+    // XLS-0096: every confidential MPT transaction type is Delegation::
+    // NotDelegable and defines no granular permission, so a transaction that
+    // carries sfDelegate is rejected with temINVALID in Transactor::preflight1
+    // before any field, proof, or ledger-state check runs. This pins that
+    // guarantee: a delegate must never be able to act on a holder's
+    // confidential balance (e.g. by registering its own encryption key).
+    testcase("ConfidentialMPT transactions are non-delegable");
+    using namespace jtx;
+
+    // featureConfidentialMPT and the delegation amendment must both be active
+    // for the delegation gate to be exercised (rather than temDISABLED).
+    BEAST_EXPECT(features[featureConfidentialMPT]);
+    BEAST_EXPECT(features[featurePermissionDelegationV1_1]);
+
+    Account const alice("alice");  // issuer
+    Account const bob("bob");      // holder / sender
+    Account const carol("carol");  // destination / clawback target
+    Account const dave("dave");    // delegate (never granted any permission)
+
+    auto const issuerSk = cmpt::ElGamalSecretKey::random();
+    auto const issuerPub = issuerSk.publicKey();
+    auto const bobSk = cmpt::ElGamalSecretKey::random();
+    auto const bobPub = bobSk.publicKey();
+    auto const carolSk = cmpt::ElGamalSecretKey::random();
+    auto const carolPub = carolSk.publicKey();
+
+    Env env{*this, features};
+    env.fund(XRP(10000), dave);
+    env.close();
+
+    MPTTester mpt(env, alice, {.holders = {bob, carol}});
+    mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+    mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
+    mpt.authorize({.account = bob});
+    mpt.authorize({.account = carol});
+    mpt.pay(alice, bob, 1000);
+    auto const id = mpt.issuanceID();
+
+    // Fund bob's confidential spending balance so Send/ConvertBack/Clawback
+    // operate against real state (though preflight rejects before that matters).
+    env(convertJV(env, bob, id, 1000, bobPub, issuerPub, bobSk.x));
+    env.close();
+    env(mergeJV(bob, id));
+    env.close();
+    env(convertJV(env, carol, id, 0, carolPub, issuerPub, carolSk.x));
+    env.close();
+    env(mergeJV(carol, id));
+    env.close();
+
+    // Each of the five confidential transaction types, submitted with
+    // delegate::As(dave), must be rejected with temINVALID at preflight.
+
+    // ConfidentialMPTConvert (tt 85).
+    env(convertJV(env, bob, id, 100, bobPub, issuerPub, std::nullopt),
+        delegate::As(dave),
+        Ter(temINVALID));
+
+    // ConfidentialMPTMergeInbox (tt 86).
+    env(mergeJV(bob, id), delegate::As(dave), Ter(temINVALID));
+
+    // ConfidentialMPTConvertBack (tt 87).
+    env(convertBackJV(
+            env, bob, id, 100, 900, bobSk.x, bobPub, issuerPub,
+            readSpending(env, id, bob)),
+        delegate::As(dave),
+        Ter(temINVALID));
+
+    // ConfidentialMPTSend (tt 88).
+    env(sendJV(
+            env, bob, carol, id, 400, 600, bobSk.x, bobPub, carolPub, issuerPub,
+            readSpending(env, id, bob)),
+        delegate::As(dave),
+        Ter(temINVALID));
+
+    // ConfidentialMPTClawback (tt 89) — issuer-initiated, still non-delegable.
+    env(clawbackJV(
+            env, alice, bob, id, 400, issuerSk.x,
+            readIssuerMirror(env, id, bob)),
+        delegate::As(dave),
+        Ter(temINVALID));
 }
 
 void

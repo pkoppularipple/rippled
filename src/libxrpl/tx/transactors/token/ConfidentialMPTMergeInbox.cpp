@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
 
+#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/ConfidentialMPT.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
@@ -16,6 +17,13 @@
 #include <cstdint>
 
 namespace xrpl {
+
+XRPAmount
+ConfidentialMPTMergeInbox::calculateBaseFee(ReadView const& view, STTx const& tx)
+{
+    return cmpt::kConfidentialFeeMultiplier *
+        Transactor::calculateBaseFee(view, tx);
+}
 
 NotTEC
 ConfidentialMPTMergeInbox::preflight(PreflightContext const& ctx)
@@ -52,8 +60,9 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
     if (sleIssuance->isFlag(lsfMPTRequireAuth) && !sleToken->isFlag(lsfMPTAuthorized))
         return tecNO_AUTH;
 
-    if (sleToken->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
-        return tecLOCKED;
+    MPTIssue const mptIssue{ctx.tx[sfMPTokenIssuanceID]};
+    if (isFrozen(ctx.view, ctx.tx[sfAccount], mptIssue))
+        return tecFROZEN;
 
     return tesSUCCESS;
 }

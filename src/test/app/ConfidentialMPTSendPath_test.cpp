@@ -58,6 +58,11 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
         json::Value jv;
         jv[jss::TransactionType] = "ConfidentialMPTConvert";
         jv[jss::Account] = account.human();
+        // Confidential transactions carry a 10x base fee (XLS-0096 §14). Set it
+        // explicitly so the harness does not autofill the plain 1x base fee.
+        jv[jss::Fee] = to_string(
+            env.current()->fees().base *
+            static_cast<XRPAmount::value_type>(cmpt::kConfidentialFeeMultiplier));
         jv[sfMPTokenIssuanceID] = to_string(id);
         jv[sfMPTAmount] = std::to_string(amount);
         jv[sfHolderEncryptedAmount] = hexOf(holderCt.serialize());
@@ -92,6 +97,11 @@ class ConfidentialMPTSendPath_test : public beast::unit_test::Suite
         json::Value jv;
         jv[jss::TransactionType] = "ConfidentialMPTMergeInbox";
         jv[jss::Account] = account.human();
+        // Confidential transactions carry a 10x base fee (XLS-0096 §14). The
+        // unit-test reference base fee is UNIT_TEST_REFERENCE_FEE; set the fee
+        // explicitly so the harness does not autofill the plain 1x base fee.
+        jv[jss::Fee] = std::to_string(
+            std::uint64_t{UNIT_TEST_REFERENCE_FEE} * cmpt::kConfidentialFeeMultiplier);
         jv[sfMPTokenIssuanceID] = to_string(id);
         return jv;
     }
@@ -154,6 +164,8 @@ public:
         testMergeInbox(all);
         testSend(all);
         testDepositAuth(all);
+        testFeeMultiplier(all);
+        testFreeze(all);
     }
 
 private:
@@ -165,6 +177,10 @@ private:
     testSend(FeatureBitset features);
     void
     testDepositAuth(FeatureBitset features);
+    void
+    testFeeMultiplier(FeatureBitset features);
+    void
+    testFreeze(FeatureBitset features);
 
     static json::Value
     sendJV(
@@ -288,6 +304,11 @@ ConfidentialMPTSendPath_test::sendJV(
     json::Value jv;
     jv[jss::TransactionType] = "ConfidentialMPTSend";
     jv[jss::Account] = from.human();
+    // Confidential transactions carry a 10x base fee (XLS-0096 §14). Set it
+    // explicitly so the harness does not autofill the plain 1x base fee.
+    jv[jss::Fee] = to_string(
+        env.current()->fees().base *
+        static_cast<XRPAmount::value_type>(cmpt::kConfidentialFeeMultiplier));
     jv[jss::Destination] = to.human();
     jv[sfMPTokenIssuanceID] = to_string(id);
     jv[sfSenderEncryptedAmount] = hexOf(senderCt.serialize());
@@ -878,6 +899,124 @@ ConfidentialMPTSendPath_test::testDepositAuth(FeatureBitset features)
         env(mergeJV(carol, id));
         env.close();
         BEAST_EXPECT(readSpending(env, id, carol).decrypt(carolSk.x, 2000) == 400);
+    }
+}
+
+void
+ConfidentialMPTSendPath_test::testFeeMultiplier(FeatureBitset features)
+{
+    testcase("Confidential MPT 10x base-fee multiplier (XLS-0096 §14)");
+    using namespace jtx;
+
+    Account const alice("alice");
+    Account const bob("bob");
+    auto const issuerPub = cmpt::ElGamalSecretKey::random().publicKey();
+    auto const bobSk = cmpt::ElGamalSecretKey::random();
+    auto const bobPub = bobSk.publicKey();
+
+    Env env{*this, features};
+    MPTTester mpt(env, alice, {.holders = {bob}});
+    mpt.create({.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount});
+    mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
+    mpt.authorize({.account = bob});
+    mpt.pay(alice, bob, 1000);
+    auto const id = mpt.issuanceID();
+
+    auto const baseDrops = env.current()->fees().base.drops();
+    auto const requiredDrops =
+        baseDrops * static_cast<XRPAmount::value_type>(cmpt::kConfidentialFeeMultiplier);
+
+    // A confidential Convert paying only the ordinary 1x base fee is rejected:
+    // the transactor requires cmpt::kConfidentialFeeMultiplier * base.
+    env(convertJV(env, bob, id, 100, bobPub, issuerPub, bobSk.x),
+        Fee(drops(XRPAmount{baseDrops})),
+        Ter(telINSUF_FEE_P));
+
+    // One drop short of the 10x requirement is still rejected.
+    env(convertJV(env, bob, id, 100, bobPub, issuerPub, bobSk.x),
+        Fee(drops(XRPAmount{requiredDrops - 1})),
+        Ter(telINSUF_FEE_P));
+
+    // Paying exactly the 10x base fee succeeds.
+    env(convertJV(env, bob, id, 100, bobPub, issuerPub, bobSk.x),
+        Fee(drops(XRPAmount{requiredDrops})));
+    env.close();
+
+    // The multiplier is scoped to confidential transactions only: an ordinary
+    // public MPT payment on the same issuance still clears at the 1x base fee.
+    mpt.pay(bob, alice, 100);
+}
+
+void
+ConfidentialMPTSendPath_test::testFreeze(FeatureBitset features)
+{
+    testcase("Confidential MPT freeze enforcement (Convert/MergeInbox)");
+    using namespace jtx;
+
+    Account const alice("alice");
+    Account const bob("bob");
+    auto const issuerPub = cmpt::ElGamalSecretKey::random().publicKey();
+    auto const bobSk = cmpt::ElGamalSecretKey::random();
+    auto const bobPub = bobSk.publicKey();
+
+    // Convert: a frozen holder cannot shield a public balance into confidential
+    // state. Without the freeze check this would let a frozen balance escape.
+    {
+        Env env{*this, features};
+        MPTTester mpt(env, alice, {.holders = {bob}});
+        mpt.create(
+            {.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount | tfMPTCanLock});
+        mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 1000);
+        auto const id = mpt.issuanceID();
+
+        // A convert on the unfrozen holder succeeds and registers the key.
+        env(convertJV(env, bob, id, 400, bobPub, issuerPub, bobSk.x));
+        env.close();
+
+        // Individually freeze bob: a subsequent convert (reusing the already
+        // registered key, so no Schnorr proof) is rejected by the freeze check.
+        mpt.set({.holder = bob, .flags = tfMPTLock});
+        env(convertJV(env, bob, id, 100, bobPub, issuerPub, std::nullopt),
+            Ter(tecFROZEN));
+
+        // Unfreezing restores the ability to convert.
+        mpt.set({.holder = bob, .flags = tfMPTUnlock});
+        env(convertJV(env, bob, id, 100, bobPub, issuerPub, std::nullopt));
+        env.close();
+    }
+
+    // MergeInbox: a holder frozen after converting cannot merge the inbox into
+    // the spending balance. Global (issuance-level) freeze is also rejected.
+    {
+        Env env{*this, features};
+        MPTTester mpt(env, alice, {.holders = {bob}});
+        mpt.create(
+            {.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount | tfMPTCanLock});
+        mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
+        mpt.authorize({.account = bob});
+        mpt.pay(alice, bob, 1000);
+        auto const id = mpt.issuanceID();
+
+        env(convertJV(env, bob, id, 400, bobPub, issuerPub, bobSk.x));
+        env.close();
+
+        // Individual freeze blocks the merge.
+        mpt.set({.holder = bob, .flags = tfMPTLock});
+        env(mergeJV(bob, id), Ter(tecFROZEN));
+
+        mpt.set({.holder = bob, .flags = tfMPTUnlock});
+
+        // Global freeze (issuance-level lock) also blocks the merge; the
+        // upgraded isFrozen helper catches this where the old raw flag check
+        // only covered the two direct lock flags.
+        mpt.set({.account = alice, .flags = tfMPTLock});
+        env(mergeJV(bob, id), Ter(tecFROZEN));
+
+        mpt.set({.account = alice, .flags = tfMPTUnlock});
+        env(mergeJV(bob, id));
+        env.close();
     }
 }
 

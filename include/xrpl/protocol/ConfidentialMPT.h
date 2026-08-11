@@ -47,6 +47,11 @@ inline constexpr std::size_t kEncryptionKeySize = kPointSize;
 /// Serialized size of an EC-ElGamal ciphertext (two compressed points).
 inline constexpr std::size_t kCiphertextSize = 2 * kPointSize;
 
+/// Base-fee multiplier applied to every confidential MPT transaction
+/// (XLS-0096 §14). Reflects the additional validation work from ciphertext
+/// checks, compact sigma proof verification, and Bulletproof verification.
+inline constexpr std::uint64_t kConfidentialFeeMultiplier = 10;
+
 //------------------------------------------------------------------------------
 
 /** A Pedersen commitment C = value*G + blind*H.

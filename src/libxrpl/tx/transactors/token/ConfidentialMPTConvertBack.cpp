@@ -97,6 +97,13 @@ loadCt(SLE const& sle, SField const& f)
 
 }  // namespace
 
+XRPAmount
+ConfidentialMPTConvertBack::calculateBaseFee(ReadView const& view, STTx const& tx)
+{
+    return cmpt::kConfidentialFeeMultiplier *
+        Transactor::calculateBaseFee(view, tx);
+}
+
 NotTEC
 ConfidentialMPTConvertBack::preflight(PreflightContext const& ctx)
 {

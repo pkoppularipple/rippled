@@ -1,5 +1,6 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTConvert.h>
 
+#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/ConfidentialMPT.h>
 #include <xrpl/protocol/ECMath.h>
 #include <xrpl/protocol/Feature.h>
@@ -32,6 +33,13 @@ validCiphertext(std::optional<Slice> const& s)
 }
 
 }  // namespace
+
+XRPAmount
+ConfidentialMPTConvert::calculateBaseFee(ReadView const& view, STTx const& tx)
+{
+    return cmpt::kConfidentialFeeMultiplier *
+        Transactor::calculateBaseFee(view, tx);
+}
 
 NotTEC
 ConfidentialMPTConvert::preflight(PreflightContext const& ctx)
@@ -97,6 +105,10 @@ ConfidentialMPTConvert::preclaim(PreclaimContext const& ctx)
         ctx.view.read(keylet::mptoken(mptIssuanceID, ctx.tx[sfAccount]));
     if (!sleToken)
         return tecOBJECT_NOT_FOUND;
+
+    MPTIssue const mptIssue{mptIssuanceID};
+    if (isFrozen(ctx.view, ctx.tx[sfAccount], mptIssue))
+        return tecFROZEN;
 
     bool const txKey = ctx.tx.isFieldPresent(sfHolderEncryptionKey);
     bool const ledgerKey = sleToken->isFieldPresent(sfHolderEncryptionKey);

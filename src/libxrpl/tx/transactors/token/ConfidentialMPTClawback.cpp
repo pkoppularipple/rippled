@@ -38,8 +38,7 @@ loadCt(SLE const& sle, SField const& f)
 XRPAmount
 ConfidentialMPTClawback::calculateBaseFee(ReadView const& view, STTx const& tx)
 {
-    return cmpt::kConfidentialFeeMultiplier *
-        Transactor::calculateBaseFee(view, tx);
+    return confidentialBaseFee(view, tx);
 }
 
 NotTEC

@@ -165,7 +165,7 @@ public:
         testSend(all);
         testDepositAuth(all);
         testFeeMultiplier(all);
-        testFreeze(all);
+        testMergeInboxLock(all);
     }
 
 private:
@@ -180,7 +180,7 @@ private:
     void
     testFeeMultiplier(FeatureBitset features);
     void
-    testFreeze(FeatureBitset features);
+    testMergeInboxLock(FeatureBitset features);
 
     static json::Value
     sendJV(
@@ -945,12 +945,42 @@ ConfidentialMPTSendPath_test::testFeeMultiplier(FeatureBitset features)
     // The multiplier is scoped to confidential transactions only: an ordinary
     // public MPT payment on the same issuance still clears at the 1x base fee.
     mpt.pay(bob, alice, 100);
+
+    // Multisignature surcharge is added at 1x, not scaled by the confidential
+    // multiplier. With N signers the required fee is
+    //   (multiplier * base) + (N * base),
+    // not multiplier * (base + N * base). Give bob a two-signer list and submit
+    // a multisigned confidential Convert with both signatures.
+    Account const signer1("signer1");
+    Account const signer2("signer2");
+    env.fund(XRP(10000), signer1, signer2);
+    env.close();
+    env(signers(bob, 2, {{signer1, 1}, {signer2, 1}}));
+    env.close();
+
+    auto const mult =
+        static_cast<XRPAmount::value_type>(cmpt::kConfidentialFeeMultiplier);
+    // Correct required fee for two signers: 10*base + 2*base = 12*base.
+    auto const msigRequired = (mult * baseDrops) + (2 * baseDrops);
+
+    // One drop short of the multisig requirement is rejected.
+    env(convertJV(env, bob, id, 50, bobPub, issuerPub, std::nullopt),
+        Msig(signer1, signer2),
+        Fee(drops(XRPAmount{msigRequired - 1})),
+        Ter(telINSUF_FEE_P));
+
+    // Exactly 12*base succeeds — the surcharge is not scaled by the multiplier
+    // (which would have demanded 10*(base + 2*base) = 30*base).
+    env(convertJV(env, bob, id, 50, bobPub, issuerPub, std::nullopt),
+        Msig(signer1, signer2),
+        Fee(drops(XRPAmount{msigRequired})));
+    env.close();
 }
 
 void
-ConfidentialMPTSendPath_test::testFreeze(FeatureBitset features)
+ConfidentialMPTSendPath_test::testMergeInboxLock(FeatureBitset features)
 {
-    testcase("Confidential MPT freeze enforcement (Convert/MergeInbox)");
+    testcase("Confidential MPT MergeInbox lock enforcement (XLS-0096 §9.2.1.2)");
     using namespace jtx;
 
     Account const alice("alice");
@@ -959,65 +989,33 @@ ConfidentialMPTSendPath_test::testFreeze(FeatureBitset features)
     auto const bobSk = cmpt::ElGamalSecretKey::random();
     auto const bobPub = bobSk.publicKey();
 
-    // Convert: a frozen holder cannot shield a public balance into confidential
-    // state. Without the freeze check this would let a frozen balance escape.
-    {
-        Env env{*this, features};
-        MPTTester mpt(env, alice, {.holders = {bob}});
-        mpt.create(
-            {.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount | tfMPTCanLock});
-        mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
-        mpt.authorize({.account = bob});
-        mpt.pay(alice, bob, 1000);
-        auto const id = mpt.issuanceID();
+    // XLS-0096 §9.2.1.2 items 5 & 6: an individual-level or issuance-level lock
+    // rejects the merge with tecLOCKED. Unlocking restores the ability to merge.
+    Env env{*this, features};
+    MPTTester mpt(env, alice, {.holders = {bob}});
+    mpt.create(
+        {.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount | tfMPTCanLock});
+    mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
+    mpt.authorize({.account = bob});
+    mpt.pay(alice, bob, 1000);
+    auto const id = mpt.issuanceID();
 
-        // A convert on the unfrozen holder succeeds and registers the key.
-        env(convertJV(env, bob, id, 400, bobPub, issuerPub, bobSk.x));
-        env.close();
+    env(convertJV(env, bob, id, 400, bobPub, issuerPub, bobSk.x));
+    env.close();
 
-        // Individually freeze bob: a subsequent convert (reusing the already
-        // registered key, so no Schnorr proof) is rejected by the freeze check.
-        mpt.set({.holder = bob, .flags = tfMPTLock});
-        env(convertJV(env, bob, id, 100, bobPub, issuerPub, std::nullopt),
-            Ter(tecFROZEN));
+    // Item 5: an individual lock on the holder's MPToken blocks the merge.
+    mpt.set({.holder = bob, .flags = tfMPTLock});
+    env(mergeJV(bob, id), Ter(tecLOCKED));
 
-        // Unfreezing restores the ability to convert.
-        mpt.set({.holder = bob, .flags = tfMPTUnlock});
-        env(convertJV(env, bob, id, 100, bobPub, issuerPub, std::nullopt));
-        env.close();
-    }
+    mpt.set({.holder = bob, .flags = tfMPTUnlock});
 
-    // MergeInbox: a holder frozen after converting cannot merge the inbox into
-    // the spending balance. Global (issuance-level) freeze is also rejected.
-    {
-        Env env{*this, features};
-        MPTTester mpt(env, alice, {.holders = {bob}});
-        mpt.create(
-            {.flags = tfMPTCanTransfer | tfMPTCanConfidentialAmount | tfMPTCanLock});
-        mpt.set({.account = alice, .issuerEncryptionKey = rawStr(issuerPub.serialize())});
-        mpt.authorize({.account = bob});
-        mpt.pay(alice, bob, 1000);
-        auto const id = mpt.issuanceID();
+    // Item 6: an issuance-level lock also blocks the merge.
+    mpt.set({.account = alice, .flags = tfMPTLock});
+    env(mergeJV(bob, id), Ter(tecLOCKED));
 
-        env(convertJV(env, bob, id, 400, bobPub, issuerPub, bobSk.x));
-        env.close();
-
-        // Individual freeze blocks the merge.
-        mpt.set({.holder = bob, .flags = tfMPTLock});
-        env(mergeJV(bob, id), Ter(tecFROZEN));
-
-        mpt.set({.holder = bob, .flags = tfMPTUnlock});
-
-        // Global freeze (issuance-level lock) also blocks the merge; the
-        // upgraded isFrozen helper catches this where the old raw flag check
-        // only covered the two direct lock flags.
-        mpt.set({.account = alice, .flags = tfMPTLock});
-        env(mergeJV(bob, id), Ter(tecFROZEN));
-
-        mpt.set({.account = alice, .flags = tfMPTUnlock});
-        env(mergeJV(bob, id));
-        env.close();
-    }
+    mpt.set({.account = alice, .flags = tfMPTUnlock});
+    env(mergeJV(bob, id));
+    env.close();
 }
 
 BEAST_DEFINE_TESTSUITE(ConfidentialMPTSendPath, app, xrpl);

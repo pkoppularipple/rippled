@@ -19,6 +19,7 @@
 #include <xrpl/ledger/helpers/OfferHelpers.h>
 #include <xrpl/ledger/helpers/RippleStateHelpers.h>
 #include <xrpl/protocol/AccountID.h>
+#include <xrpl/protocol/ConfidentialMPT.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
 #include <xrpl/protocol/LedgerFormats.h>
@@ -352,6 +353,20 @@ Transactor::calculateBaseFee(ReadView const& view, STTx const& tx)
         tx.isFieldPresent(sfSigners) ? tx.getFieldArray(sfSigners).size() : 0;
 
     return baseFee + (signerCount * baseFee);
+}
+
+XRPAmount
+confidentialBaseFee(ReadView const& view, STTx const& tx)
+{
+    // Mirrors Transactor::calculateBaseFee, but scales only the base fee by the
+    // confidential multiplier; the per-signer multisignature surcharge is added
+    // at 1x so multisigned confidential transactions are not overcharged.
+    XRPAmount const baseFee = view.fees().base;
+
+    std::size_t const signerCount =
+        tx.isFieldPresent(sfSigners) ? tx.getFieldArray(sfSigners).size() : 0;
+
+    return (cmpt::kConfidentialFeeMultiplier * baseFee) + (signerCount * baseFee);
 }
 
 // Returns the fee in fee units, not scaled for load.

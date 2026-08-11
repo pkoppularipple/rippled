@@ -1,6 +1,5 @@
 #include <xrpl/tx/transactors/token/ConfidentialMPTMergeInbox.h>
 
-#include <xrpl/ledger/helpers/MPTokenHelpers.h>
 #include <xrpl/protocol/ConfidentialMPT.h>
 #include <xrpl/protocol/Feature.h>
 #include <xrpl/protocol/Indexes.h>
@@ -21,8 +20,7 @@ namespace xrpl {
 XRPAmount
 ConfidentialMPTMergeInbox::calculateBaseFee(ReadView const& view, STTx const& tx)
 {
-    return cmpt::kConfidentialFeeMultiplier *
-        Transactor::calculateBaseFee(view, tx);
+    return confidentialBaseFee(view, tx);
 }
 
 NotTEC
@@ -60,9 +58,10 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
     if (sleIssuance->isFlag(lsfMPTRequireAuth) && !sleToken->isFlag(lsfMPTAuthorized))
         return tecNO_AUTH;
 
-    MPTIssue const mptIssue{ctx.tx[sfMPTokenIssuanceID]};
-    if (isFrozen(ctx.view, ctx.tx[sfAccount], mptIssue))
-        return tecFROZEN;
+    // XLS-0096 §9.2.1.2 (items 5 & 6): an individual or issuance-level lock
+    // rejects the merge with tecLOCKED.
+    if (sleToken->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
+        return tecLOCKED;
 
     return tesSUCCESS;
 }

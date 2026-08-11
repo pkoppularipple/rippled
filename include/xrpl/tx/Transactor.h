@@ -491,6 +491,17 @@ Transactor::checkExtraFeatures(PreflightContext const& ctx)
 NotTEC
 preflight0(PreflightContext const& ctx, std::uint32_t flagMask);
 
+/** Base fee for a confidential MPT transaction (XLS-0096 §14).
+
+    Applies cmpt::kConfidentialFeeMultiplier to the transaction base fee only,
+    then adds the per-signer multisignature surcharge at 1x, matching the
+    structure of Transactor::calculateBaseFee. Multiplying that function's
+    result whole would erroneously scale the signer surcharge by the
+    confidential multiplier, overcharging multisigned confidential transactions.
+*/
+XRPAmount
+confidentialBaseFee(ReadView const& view, STTx const& tx);
+
 namespace detail {
 
 /** Checks the validity of the transactor signing key.

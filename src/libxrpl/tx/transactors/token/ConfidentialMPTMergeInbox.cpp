@@ -17,6 +17,12 @@
 
 namespace xrpl {
 
+XRPAmount
+ConfidentialMPTMergeInbox::calculateBaseFee(ReadView const& view, STTx const& tx)
+{
+    return confidentialBaseFee(view, tx);
+}
+
 NotTEC
 ConfidentialMPTMergeInbox::preflight(PreflightContext const& ctx)
 {
@@ -52,6 +58,8 @@ ConfidentialMPTMergeInbox::preclaim(PreclaimContext const& ctx)
     if (sleIssuance->isFlag(lsfMPTRequireAuth) && !sleToken->isFlag(lsfMPTAuthorized))
         return tecNO_AUTH;
 
+    // XLS-0096 §9.2.1.2 (items 5 & 6): an individual or issuance-level lock
+    // rejects the merge with tecLOCKED.
     if (sleToken->isFlag(lsfMPTLocked) || sleIssuance->isFlag(lsfMPTLocked))
         return tecLOCKED;
 

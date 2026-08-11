@@ -29,6 +29,10 @@ public:
     {
     }
 
+    // 10x base fee for ZK-proof verification cost (XLS-0096 §14).
+    static XRPAmount
+    calculateBaseFee(ReadView const& view, STTx const& tx);
+
     static bool
     checkExtraFeatures(PreflightContext const& ctx);
 

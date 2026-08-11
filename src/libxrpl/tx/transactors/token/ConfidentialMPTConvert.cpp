@@ -33,6 +33,12 @@ validCiphertext(std::optional<Slice> const& s)
 
 }  // namespace
 
+XRPAmount
+ConfidentialMPTConvert::calculateBaseFee(ReadView const& view, STTx const& tx)
+{
+    return confidentialBaseFee(view, tx);
+}
+
 NotTEC
 ConfidentialMPTConvert::preflight(PreflightContext const& ctx)
 {

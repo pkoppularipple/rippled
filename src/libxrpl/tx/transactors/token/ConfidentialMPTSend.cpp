@@ -22,6 +22,12 @@
 
 namespace xrpl {
 
+XRPAmount
+ConfidentialMPTSend::calculateBaseFee(ReadView const& view, STTx const& tx)
+{
+    return confidentialBaseFee(view, tx);
+}
+
 bool
 ConfidentialMPTSend::checkExtraFeatures(PreflightContext const& ctx)
 {

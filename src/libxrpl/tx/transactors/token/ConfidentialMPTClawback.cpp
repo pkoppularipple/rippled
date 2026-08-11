@@ -35,6 +35,12 @@ loadCt(SLE const& sle, SField const& f)
 
 }  // namespace
 
+XRPAmount
+ConfidentialMPTClawback::calculateBaseFee(ReadView const& view, STTx const& tx)
+{
+    return confidentialBaseFee(view, tx);
+}
+
 NotTEC
 ConfidentialMPTClawback::preflight(PreflightContext const& ctx)
 {

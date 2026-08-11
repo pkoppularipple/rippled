@@ -54,6 +54,10 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
         json::Value jv;
         jv[jss::TransactionType] = "ConfidentialMPTConvert";
         jv[jss::Account] = account.human();
+        // Confidential transactions carry a 10x base fee (XLS-0096 §14).
+        jv[jss::Fee] = to_string(
+            env.current()->fees().base *
+            static_cast<XRPAmount::value_type>(cmpt::kConfidentialFeeMultiplier));
         jv[sfMPTokenIssuanceID] = to_string(id);
         jv[sfMPTAmount] = std::to_string(amount);
         jv[sfHolderEncryptedAmount] =
@@ -81,6 +85,9 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
         json::Value jv;
         jv[jss::TransactionType] = "ConfidentialMPTMergeInbox";
         jv[jss::Account] = account.human();
+        // Confidential transactions carry a 10x base fee (XLS-0096 §14).
+        jv[jss::Fee] = std::to_string(
+            std::uint64_t{UNIT_TEST_REFERENCE_FEE} * cmpt::kConfidentialFeeMultiplier);
         jv[sfMPTokenIssuanceID] = to_string(id);
         return jv;
     }
@@ -130,6 +137,10 @@ class ConfidentialMPTClawback_test : public beast::unit_test::Suite
         json::Value jv;
         jv[jss::TransactionType] = "ConfidentialMPTClawback";
         jv[jss::Account] = issuer.human();
+        // Confidential transactions carry a 10x base fee (XLS-0096 §14).
+        jv[jss::Fee] = to_string(
+            env.current()->fees().base *
+            static_cast<XRPAmount::value_type>(cmpt::kConfidentialFeeMultiplier));
         jv[sfHolder] = holder.human();
         jv[sfMPTokenIssuanceID] = to_string(id);
         jv[sfMPTAmount] = std::to_string(amount);
